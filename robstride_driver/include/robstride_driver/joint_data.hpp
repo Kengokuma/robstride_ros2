@@ -71,6 +71,7 @@ struct FeedbackStatus
 struct ParameterStatus
 {
   bool received{false};
+  uint8_t status{0};
   uint16_t index{0};
   uint32_t value{0};
   std::chrono::steady_clock::time_point timestamp{};

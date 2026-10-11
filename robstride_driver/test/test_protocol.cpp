@@ -80,10 +80,25 @@ TEST(Protocol, DecodesParameterReadback)
   const auto response = rs::decode_parameter_response(0x110001fdu, data, 8, true, 0xfd);
   ASSERT_TRUE(response.has_value());
   EXPECT_EQ(response->motor_id, 1u);
+  EXPECT_EQ(response->status, 0u);
   EXPECT_EQ(response->index, rs::kIndexCanTimeout);
   EXPECT_EQ(response->value, 20000u);
-  EXPECT_FALSE(rs::decode_parameter_response(0x110101fdu, data, 8, true, 0xfd));
+  const auto error_response = rs::decode_parameter_response(0x110101fdu, data, 8, true, 0xfd);
+  ASSERT_TRUE(error_response.has_value());
+  EXPECT_EQ(error_response->motor_id, 1u);
+  EXPECT_EQ(error_response->status, 1u);
   EXPECT_FALSE(rs::decode_parameter_response(0x110001fdu, data, 8, false, 0xfd));
+}
+
+TEST(Protocol, DecodesUint8RunModeWithoutRequiringZeroPadding)
+{
+  std::array<uint8_t, 8> data{0x05, 0x70, 0x00, 0x00, 0x00, 0xff, 0x01, 0x22};
+  const auto response = rs::decode_parameter_response(0x110004fdu, data, 8, true, 0xfd);
+  ASSERT_TRUE(response.has_value());
+  EXPECT_EQ(response->motor_id, 4u);
+  EXPECT_EQ(response->status, 0u);
+  EXPECT_EQ(response->index, rs::kIndexRunMode);
+  EXPECT_EQ(response->value, 0u);
 }
 
 TEST(Protocol, DecodesFeedbackAndRejectsWrongHost)

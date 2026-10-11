@@ -41,6 +41,7 @@ struct Feedback
 struct ParameterResponse
 {
   uint8_t motor_id{0};
+  uint8_t status{0};
   uint16_t index{0};
   uint32_t value{0};
 };

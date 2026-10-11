@@ -174,7 +174,7 @@ JointData parse_joint(const hardware_interface::ComponentInfo & info)
     joint.kd = required_number(info.parameters, "kd");
     joint.can_timeout_ticks = static_cast<uint32_t>(parse_integer(
         required_value(info.parameters, "can_timeout_ticks"), "can_timeout_ticks",
-        1, std::numeric_limits<uint32_t>::max(), 0));
+        0, std::numeric_limits<uint32_t>::max(), 0));
     joint.direction = number_or_value(info.parameters, "direction", 1.0);
     joint.gear_ratio = number_or_value(info.parameters, "gear_ratio", 1.0);
     joint.position_offset = number_or_value(info.parameters, "position_offset", 0.0);

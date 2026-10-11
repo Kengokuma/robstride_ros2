@@ -252,6 +252,8 @@ TEST(DriverConfig, CustomProfileRequiresCompleteValidatedLimits)
 TEST(DriverConfig, AcceptsValidBoundaryWatchdog)
 {
   auto hardware = valid_hardware_info();
+  hardware.joints[0].parameters["can_timeout_ticks"] = "0";
+  EXPECT_NO_THROW(rs::parse_driver_configuration(hardware));
   hardware.joints[0].parameters["can_timeout_ticks"] =
     std::to_string(std::numeric_limits<uint32_t>::max());
   EXPECT_NO_THROW(rs::parse_driver_configuration(hardware));
@@ -272,7 +274,7 @@ TEST(DriverConfig, RejectsNonFiniteJointValues)
 
 TEST(DriverConfig, RejectsInvalidWatchdogValues)
 {
-  for (const auto * value : {"0", "4294967296", "4000ticks"}) {
+  for (const auto * value : {"-1", "4294967296", "4000ticks"}) {
     auto hardware = valid_hardware_info();
     hardware.joints[0].parameters["can_timeout_ticks"] = value;
     EXPECT_THROW(rs::parse_driver_configuration(hardware), std::runtime_error) << value;

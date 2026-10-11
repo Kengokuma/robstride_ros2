@@ -59,7 +59,7 @@ bool RobStrideDriver::initialize(DriverConfiguration configuration)
       return false;
     }
     const auto & command = joint.command_limits;
-    if (joint.can_id == 0 || joint.can_timeout_ticks == 0 ||
+    if (joint.can_id == 0 ||
       !can_ids.insert(joint.can_id).second ||
       !std::isfinite(command.position_min) || !std::isfinite(command.position_max) ||
       !std::isfinite(command.velocity_min) || !std::isfinite(command.velocity_max) ||
@@ -138,7 +138,13 @@ bool RobStrideDriver::start()
     if (settings_.clear_faults_on_start) {
       transport_->send_transaction(make_stop(joint.can_id, settings_.host_id, true));
     }
-    if (!write_and_confirm_parameter(joint, kIndexCanTimeout, joint.can_timeout_ticks) ||
+    if (joint.can_timeout_ticks == 0) {
+      RCLCPP_WARN(
+        logger_, "Joint '%s': motor CAN watchdog configuration is disabled",
+        joint.name.c_str());
+    }
+    if ((joint.can_timeout_ticks != 0 &&
+      !write_and_confirm_parameter(joint, kIndexCanTimeout, joint.can_timeout_ticks)) ||
       !write_and_confirm_parameter(joint, kIndexRunMode, 0))
     {
       disable_all();
@@ -194,7 +200,45 @@ bool RobStrideDriver::update_state()
       auto & joint = joints_[joint_index];
       if (joint.feedback_status.received) {joint.state = joint.feedback;}
 
-      if (settings_.fail_on_feedback_timeout) {
+      if (joint.feedback_status.received) {
+        const int attempts_before_update = joint.recovery.attempts;
+        const auto action = joint.recovery.update(
+          joint.feedback_status.mode, now, settings_.recovery_timeout,
+          settings_.recovery_retry_interval);
+        recovery_metrics_[joint_index].active = joint.recovery.active;
+        if (joint.recovery.attempts > attempts_before_update) {
+          recovery_metrics_[joint_index].attempts.fetch_add(
+            static_cast<uint64_t>(joint.recovery.attempts - attempts_before_update));
+        }
+        if (action == RecoveryAction::recovered) {
+          recovery_updates_.push_back(
+            CanTransport::RecoveryUpdate{joint_index, std::nullopt});
+          runtime_events_.push_back(
+            RuntimeEvent{
+              RuntimeEventKind::recovered, joint_index, kMotorModeRun, attempts_before_update});
+        } else if (action == RecoveryAction::failed) {
+          runtime_events_.push_back(
+            RuntimeEvent{
+              RuntimeEventKind::recovery_failed, joint_index, joint.recovery.detected_mode,
+              joint.recovery.attempts});
+          read_failed = true;
+          break;
+        } else if (action == RecoveryAction::send_enable) {
+          if (joint.recovery.attempts == 1) {
+            runtime_events_.push_back(
+              RuntimeEvent{
+                RuntimeEventKind::recovery_started, joint_index, joint.recovery.detected_mode,
+                joint.recovery.attempts});
+          }
+          recovery_updates_.push_back(
+            CanTransport::RecoveryUpdate{
+              joint_index, make_enable(joint.can_id, settings_.host_id)});
+        }
+      }
+
+      // Once Reset feedback has started recovery, a power-cycle gap is expected. Let the
+      // recovery deadline govern that gap instead of the shorter steady-state feedback timeout.
+      if (settings_.fail_on_feedback_timeout && !joint.recovery.active) {
         const auto reference =
           joint.feedback_status.received ? joint.feedback_status.timestamp : activated_at_;
         if (now - reference > settings_.feedback_timeout) {
@@ -203,41 +247,6 @@ bool RobStrideDriver::update_state()
           read_failed = true;
           break;
         }
-      }
-
-      if (!joint.feedback_status.received) {continue;}
-      const int attempts_before_update = joint.recovery.attempts;
-      const auto action = joint.recovery.update(
-        joint.feedback_status.mode, now, settings_.recovery_timeout,
-        settings_.recovery_retry_interval);
-      recovery_metrics_[joint_index].active = joint.recovery.active;
-      if (joint.recovery.attempts > attempts_before_update) {
-        recovery_metrics_[joint_index].attempts.fetch_add(
-          static_cast<uint64_t>(joint.recovery.attempts - attempts_before_update));
-      }
-      if (action == RecoveryAction::recovered) {
-        recovery_updates_.push_back(
-          CanTransport::RecoveryUpdate{joint_index, std::nullopt});
-        runtime_events_.push_back(
-          RuntimeEvent{
-            RuntimeEventKind::recovered, joint_index, kMotorModeRun, attempts_before_update});
-      } else if (action == RecoveryAction::failed) {
-        runtime_events_.push_back(
-          RuntimeEvent{
-            RuntimeEventKind::recovery_failed, joint_index, joint.recovery.detected_mode,
-            joint.recovery.attempts});
-        read_failed = true;
-        break;
-      } else if (action == RecoveryAction::send_enable) {
-        if (joint.recovery.attempts == 1) {
-          runtime_events_.push_back(
-            RuntimeEvent{
-              RuntimeEventKind::recovery_started, joint_index, joint.recovery.detected_mode,
-              joint.recovery.attempts});
-        }
-        recovery_updates_.push_back(
-          CanTransport::RecoveryUpdate{
-            joint_index, make_enable(joint.can_id, settings_.host_id)});
       }
     }
   }
@@ -516,6 +525,7 @@ void RobStrideDriver::receive_frame(can_msgs::msg::Frame::ConstSharedPtr msg)
     std::lock_guard<std::mutex> lock(state_mutex_);
     auto & joint = joints_[joint_entry->second];
     joint.parameter_status.received = true;
+    joint.parameter_status.status = parameter->status;
     joint.parameter_status.index = parameter->index;
     joint.parameter_status.value = parameter->value;
     joint.parameter_status.timestamp = std::chrono::steady_clock::now();
@@ -590,14 +600,27 @@ bool RobStrideDriver::write_and_confirm_parameter(
     transport_->send_transaction(make_read_parameter(joint.can_id, settings_.host_id, index));
 
     std::unique_lock<std::mutex> lock(state_mutex_);
-    const bool confirmed = feedback_condition_.wait_for(
+    const bool response_received = feedback_condition_.wait_for(
       lock, settings_.startup_confirmation_timeout,
-      [&joint, index, value, requested_at]() {
+      [&joint, index, requested_at]() {
         return joint.parameter_status.received &&
                joint.parameter_status.timestamp >= requested_at &&
-               joint.parameter_status.index == index && joint.parameter_status.value == value;
+               joint.parameter_status.index == index;
       });
-    if (confirmed) {return true;}
+    if (response_received && joint.parameter_status.status == 0 &&
+      joint.parameter_status.value == value)
+    {
+      return true;
+    }
+    if (response_received && joint.parameter_status.status != 0) {
+      RCLCPP_WARN(
+        logger_, "Joint '%s': parameter 0x%04X returned motor error status %u",
+        joint.name.c_str(), index, joint.parameter_status.status);
+    } else if (response_received) {
+      RCLCPP_WARN(
+        logger_, "Joint '%s': parameter 0x%04X read back %u instead of %u",
+        joint.name.c_str(), index, joint.parameter_status.value, value);
+    }
     RCLCPP_WARN(
       logger_, "Joint '%s': parameter 0x%04X confirmation attempt %d/%d failed",
       joint.name.c_str(), index, attempt, settings_.startup_retries);

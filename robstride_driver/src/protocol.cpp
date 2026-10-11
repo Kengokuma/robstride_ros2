@@ -148,15 +148,20 @@ std::optional<ParameterResponse> decode_parameter_response(
   }
 
   const uint16_t area = static_cast<uint16_t>((id >> 8) & 0xffff);
-  if ((area >> 8) != 0) {return std::nullopt;}
   ParameterResponse response;
   response.motor_id = static_cast<uint8_t>(area & 0xff);
+  response.status = static_cast<uint8_t>(area >> 8);
   response.index = static_cast<uint16_t>(data[0]) |
     (static_cast<uint16_t>(data[1]) << 8);
-  response.value = static_cast<uint32_t>(data[4]) |
-    (static_cast<uint32_t>(data[5]) << 8) |
-    (static_cast<uint32_t>(data[6]) << 16) |
-    (static_cast<uint32_t>(data[7]) << 24);
+  if (response.index == kIndexRunMode) {
+    // run_mode is uint8. Some RS02 firmware leaves bytes 5..7 unspecified.
+    response.value = data[4];
+  } else {
+    response.value = static_cast<uint32_t>(data[4]) |
+      (static_cast<uint32_t>(data[5]) << 8) |
+      (static_cast<uint32_t>(data[6]) << 16) |
+      (static_cast<uint32_t>(data[7]) << 24);
+  }
   return response;
 }
 

@@ -38,7 +38,7 @@
     <xacro:robstride_command_limits position_min="${command_position_min}" position_max="${command_position_max}" velocity_min="${command_velocity_min}" velocity_max="${command_velocity_max}" effort_min="${command_effort_min}" effort_max="${command_effort_max}"/>
   </xacro:macro>
 
-  <xacro:macro name="robstride_rs02_params" params="can_id kp kd direction:=1 gear_ratio:=1.0 position_offset:=0.0 can_timeout_ticks:=4000 command_position_min:='' command_position_max:='' command_velocity_min:='' command_velocity_max:='' command_effort_min:='' command_effort_max:=''">
+  <xacro:macro name="robstride_rs02_params" params="can_id kp kd direction:=1 gear_ratio:=1.0 position_offset:=0.0 can_timeout_ticks:=0 command_position_min:='' command_position_max:='' command_velocity_min:='' command_velocity_max:='' command_effort_min:='' command_effort_max:=''">
     <param name="model">RS02</param>
     <param name="can_id">${can_id}</param><param name="can_timeout_ticks">${can_timeout_ticks}</param>
     <param name="kp">${kp}</param><param name="kd">${kd}</param><param name="direction">${direction}</param><param name="gear_ratio">${gear_ratio}</param><param name="position_offset">${position_offset}</param>
