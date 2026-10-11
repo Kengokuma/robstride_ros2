@@ -200,45 +200,7 @@ bool RobStrideDriver::update_state()
       auto & joint = joints_[joint_index];
       if (joint.feedback_status.received) {joint.state = joint.feedback;}
 
-      if (joint.feedback_status.received) {
-        const int attempts_before_update = joint.recovery.attempts;
-        const auto action = joint.recovery.update(
-          joint.feedback_status.mode, now, settings_.recovery_timeout,
-          settings_.recovery_retry_interval);
-        recovery_metrics_[joint_index].active = joint.recovery.active;
-        if (joint.recovery.attempts > attempts_before_update) {
-          recovery_metrics_[joint_index].attempts.fetch_add(
-            static_cast<uint64_t>(joint.recovery.attempts - attempts_before_update));
-        }
-        if (action == RecoveryAction::recovered) {
-          recovery_updates_.push_back(
-            CanTransport::RecoveryUpdate{joint_index, std::nullopt});
-          runtime_events_.push_back(
-            RuntimeEvent{
-              RuntimeEventKind::recovered, joint_index, kMotorModeRun, attempts_before_update});
-        } else if (action == RecoveryAction::failed) {
-          runtime_events_.push_back(
-            RuntimeEvent{
-              RuntimeEventKind::recovery_failed, joint_index, joint.recovery.detected_mode,
-              joint.recovery.attempts});
-          read_failed = true;
-          break;
-        } else if (action == RecoveryAction::send_enable) {
-          if (joint.recovery.attempts == 1) {
-            runtime_events_.push_back(
-              RuntimeEvent{
-                RuntimeEventKind::recovery_started, joint_index, joint.recovery.detected_mode,
-                joint.recovery.attempts});
-          }
-          recovery_updates_.push_back(
-            CanTransport::RecoveryUpdate{
-              joint_index, make_enable(joint.can_id, settings_.host_id)});
-        }
-      }
-
-      // Once Reset feedback has started recovery, a power-cycle gap is expected. Let the
-      // recovery deadline govern that gap instead of the shorter steady-state feedback timeout.
-      if (settings_.fail_on_feedback_timeout && !joint.recovery.active) {
+      if (settings_.fail_on_feedback_timeout) {
         const auto reference =
           joint.feedback_status.received ? joint.feedback_status.timestamp : activated_at_;
         if (now - reference > settings_.feedback_timeout) {
@@ -247,6 +209,41 @@ bool RobStrideDriver::update_state()
           read_failed = true;
           break;
         }
+      }
+
+      if (!joint.feedback_status.received) {continue;}
+      const int attempts_before_update = joint.recovery.attempts;
+      const auto action = joint.recovery.update(
+        joint.feedback_status.mode, now, settings_.recovery_timeout,
+        settings_.recovery_retry_interval);
+      recovery_metrics_[joint_index].active = joint.recovery.active;
+      if (joint.recovery.attempts > attempts_before_update) {
+        recovery_metrics_[joint_index].attempts.fetch_add(
+          static_cast<uint64_t>(joint.recovery.attempts - attempts_before_update));
+      }
+      if (action == RecoveryAction::recovered) {
+        recovery_updates_.push_back(
+          CanTransport::RecoveryUpdate{joint_index, std::nullopt});
+        runtime_events_.push_back(
+          RuntimeEvent{
+            RuntimeEventKind::recovered, joint_index, kMotorModeRun, attempts_before_update});
+      } else if (action == RecoveryAction::failed) {
+        runtime_events_.push_back(
+          RuntimeEvent{
+            RuntimeEventKind::recovery_failed, joint_index, joint.recovery.detected_mode,
+            joint.recovery.attempts});
+        read_failed = true;
+        break;
+      } else if (action == RecoveryAction::send_enable) {
+        if (joint.recovery.attempts == 1) {
+          runtime_events_.push_back(
+            RuntimeEvent{
+              RuntimeEventKind::recovery_started, joint_index, joint.recovery.detected_mode,
+              joint.recovery.attempts});
+        }
+        recovery_updates_.push_back(
+          CanTransport::RecoveryUpdate{
+            joint_index, make_enable(joint.can_id, settings_.host_id)});
       }
     }
   }
