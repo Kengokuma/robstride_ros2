@@ -107,7 +107,9 @@ struct RecoveryState
       detected_mode = reported_mode;
       started_at = now;
     }
-    if (now - started_at >= timeout) {return RecoveryAction::failed;}
+    if (timeout.count() > 0 && now - started_at >= timeout) {
+      return RecoveryAction::failed;
+    }
     if (attempts == 0 || now - last_attempt_at >= retry_interval) {
       last_attempt_at = now;
       ++attempts;

@@ -65,7 +65,7 @@ private:
 
   void receive_frame(can_msgs::msg::Frame::ConstSharedPtr msg);
   bool write_and_confirm_parameter(JointData & joint, uint16_t index, uint32_t value);
-  bool enable_and_confirm_all();
+  bool enable_and_confirm_all(std::chrono::steady_clock::time_point deadline);
   void disable_all();
   void log_runtime_events();
   bool check_transport_health();

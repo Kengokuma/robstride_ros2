@@ -20,17 +20,18 @@
       <param name="can_rx_topic">$(arg can_rx_topic)</param>
       <param name="can_rx_qos_depth">32</param>
       <param name="feedback_timeout_ms">3000</param>
-      <param name="fail_on_feedback_timeout">true</param>
+      <param name="fail_on_feedback_timeout">false</param>
       <param name="transmit_failure_timeout_ms">1000</param>
-      <param name="run_mode_recovery_timeout_ms">10000</param>
+      <param name="run_mode_recovery_timeout_ms">0</param>
       <param name="run_mode_recovery_retry_interval_ms">100</param>
       <param name="clear_faults_on_activate">true</param>
-      <param name="set_zero_on_activate">true</param>
+      <param name="set_zero_on_activate">false</param>
       <param name="shutdown_stop_repetitions">3</param>
       <param name="shutdown_stop_interval_ms">20</param>
       <param name="shutdown_confirmation_timeout_ms">300</param>
       <param name="startup_connection_timeout_ms">3000</param>
       <param name="startup_confirmation_timeout_ms">500</param>
+      <param name="startup_recovery_timeout_ms">0</param>
       <param name="startup_retries">3</param>
     </hardware>
     <joint name="robstride_joint">

@@ -323,11 +323,11 @@ try
   settings.feedback_timeout = std::chrono::milliseconds(
     integer("feedback_timeout_ms", "3000"));
   settings.fail_on_feedback_timeout = parse_bool(
-    hardware_parameter_or(info, "fail_on_feedback_timeout", "true"));
+    hardware_parameter_or(info, "fail_on_feedback_timeout", "false"));
   settings.transmit_failure_timeout = std::chrono::milliseconds(
     integer("transmit_failure_timeout_ms", "1000"));
   settings.recovery_timeout = std::chrono::milliseconds(
-    integer("run_mode_recovery_timeout_ms", "500"));
+    integer("run_mode_recovery_timeout_ms", "0", 0));
   settings.recovery_retry_interval = std::chrono::milliseconds(
     integer("run_mode_recovery_retry_interval_ms", "100"));
   settings.clear_faults_on_start = parse_bool(
@@ -344,9 +344,13 @@ try
     integer("startup_connection_timeout_ms", "3000"));
   settings.startup_confirmation_timeout = std::chrono::milliseconds(
     integer("startup_confirmation_timeout_ms", "500"));
+  settings.startup_recovery_timeout = std::chrono::milliseconds(
+    integer("startup_recovery_timeout_ms", "0", 0));
   settings.startup_retries = integer("startup_retries", "3");
 
-  if (settings.recovery_retry_interval > settings.recovery_timeout) {
+  if (settings.recovery_timeout.count() > 0 &&
+    settings.recovery_retry_interval > settings.recovery_timeout)
+  {
     throw std::runtime_error(
             "run_mode_recovery_retry_interval_ms must not exceed run_mode_recovery_timeout_ms");
   }

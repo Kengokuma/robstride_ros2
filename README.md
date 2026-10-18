@@ -155,9 +155,9 @@ description.
 | `can_rx_topic` | `from_can_bus` | Incoming `can_msgs/msg/Frame` topic |
 | `can_rx_qos_depth` | `32` | Reliable, volatile feedback QoS depth (`1`–`4096`); increase for large motor groups |
 | `feedback_timeout_ms` | `3000` | Maximum time without motor feedback before returning ERROR |
-| `fail_on_feedback_timeout` | `true` | Stop the hardware when feedback times out |
+| `fail_on_feedback_timeout` | `false` | Return ERROR when feedback times out; keep `false` to allow power-loss recovery |
 | `transmit_failure_timeout_ms` | `1000` | Grace period before a missing transmit endpoint or stalled sender returns ERROR |
-| `run_mode_recovery_timeout_ms` | `500` | Time allowed for an active motor to recover to Run mode before returning ERROR |
+| `run_mode_recovery_timeout_ms` | `0` | Recovery deadline; `0` keeps retrying until the motor returns to Run mode |
 | `run_mode_recovery_retry_interval_ms` | `100` | Minimum interval between automatic enable retries |
 | `clear_faults_on_activate` | `true` | Clear motor faults during activation |
 | `set_zero_on_activate` | `false` | Set the current motor position as mechanical zero |
@@ -166,13 +166,20 @@ description.
 | `shutdown_confirmation_timeout_ms` | `300` | Wait for Reset mode feedback; `0` disables confirmation |
 | `startup_connection_timeout_ms` | `3000` | Wait for the CAN bridge topic endpoints |
 | `startup_confirmation_timeout_ms` | `500` | Per-attempt parameter and enable confirmation timeout |
-| `startup_retries` | `3` | Number of startup parameter and enable attempts |
+| `startup_recovery_timeout_ms` | `0` | Startup deadline; `0` keeps waiting for motor responses until ROS shutdown |
+| `startup_retries` | `3` | Attempts for each startup parameter confirmation |
+
+If the motor is not powered when the controller manager starts, startup parameter
+and enable confirmations are retried. With the default `startup_recovery_timeout_ms=0`,
+the manager stays in startup until the motor responds or ROS shuts down; controller
+spawners wait for the manager during this time.
 
 While active, the hardware monitors each motor's operating state. If a motor
 unexpectedly leaves Run mode, the component logs a warning and attempts to
 enable it again. Commands resume after Run mode is confirmed. If recovery does
 not complete within `run_mode_recovery_timeout_ms`, the hardware reports an
-error and stops all motors.
+error and stops all motors. A value of `0` disables this deadline and keeps
+retrying until the motor returns to Run mode.
 
 The transmit path is also monitored while the hardware is active. A temporary
 loss of the CAN bridge's transmit topic endpoint produces a throttled warning.
@@ -448,7 +455,7 @@ ros2 topic pub --rate 20 \
 | Setting | Behavior |
 |---|---|
 | `can_timeout_ticks` | The motor returns to Reset mode after host commands stop |
-| `feedback_timeout_ms` | The hardware returns ERROR after motor feedback stops |
+| `feedback_timeout_ms` | Marks feedback stale; returns ERROR only when `fail_on_feedback_timeout` is `true` |
 | `transmit_failure_timeout_ms` | Persistent transmit endpoint loss or a stalled sender returns ERROR |
 | `shutdown_stop_repetitions` | Zero commands and stop commands are repeated |
 | `shutdown_confirmation_timeout_ms` | The hardware waits for Reset mode feedback |

@@ -126,9 +126,9 @@ ros2 topic pub --rate 20 \
 | `can_rx_topic` | `from_can_bus` | 受信する`can_msgs/msg/Frame` topic |
 | `can_rx_qos_depth` | `32` | reliable・volatileなfeedback QoS depth（`1`〜`4096`）。多数のモーターを使う場合は増加を検討 |
 | `feedback_timeout_ms` | `3000` | feedbackを受信できない状態でERRORを返すまでの時間 |
-| `fail_on_feedback_timeout` | `true` | feedback timeout時にHardwareを停止 |
+| `fail_on_feedback_timeout` | `false` | `true`の場合、feedback timeoutでERRORを返す。電源断復帰を有効にするには`false` |
 | `transmit_failure_timeout_ms` | `1000` | 送信endpointの消失またはsender停滞をERRORにするまでの猶予時間 |
-| `run_mode_recovery_timeout_ms` | `500` | active中のモーターがRunへ復帰するまで待つ時間 |
+| `run_mode_recovery_timeout_ms` | `0` | 復帰期限。`0`の場合、Run modeに戻るまで再試行 |
 | `run_mode_recovery_retry_interval_ms` | `100` | 自動有効化を再試行する最小間隔 |
 | `clear_faults_on_activate` | `true` | activate時にモーターのfaultをclear |
 | `set_zero_on_activate` | `false` | activate時の現在位置を機械ゼロに設定 |
@@ -137,9 +137,12 @@ ros2 topic pub --rate 20 \
 | `shutdown_confirmation_timeout_ms` | `300` | Reset modeのfeedbackを待つ時間。`0`で確認を無効化 |
 | `startup_connection_timeout_ms` | `3000` | CAN bridgeのtopic endpointを待つ時間 |
 | `startup_confirmation_timeout_ms` | `500` | parameterと有効化確認の1試行あたりのtimeout |
-| `startup_retries` | `3` | 起動時のparameter設定と有効化の最大試行回数 |
+| `startup_recovery_timeout_ms` | `0` | 起動時の再試行期限。`0`の場合、ROS終了までモーター応答を待つ |
+| `startup_retries` | `3` | 各startup parameter確認の試行回数 |
 
-Hardwareがactiveの間は、各モーターの動作状態を監視します。モーターが意図せずRun以外へ移行するとWARNを出力し、自動的に再度有効化します。Runへの復帰を確認すると指令送信を再開します。`run_mode_recovery_timeout_ms`以内に復帰しない場合はHardwareがERRORを返し、すべてのモーターを停止します。
+controller manager起動時にモーターの電源が入っていない場合、parameter設定と有効化確認を再試行します。既定の`startup_recovery_timeout_ms=0`ではモーター応答またはROS終了まで起動を待つため、この間spawnerはcontroller managerのサービスを待ちます。
+
+Hardwareがactiveの間は、各モーターの動作状態を監視します。モーターが意図せずRun以外へ移行するとWARNを出力し、自動的に再度有効化します。Runへの復帰を確認すると指令送信を再開します。`run_mode_recovery_timeout_ms`以内に復帰しない場合はHardwareがERRORを返し、すべてのモーターを停止します。`0`を指定すると期限を設けず、Run modeに戻るまで再試行します。
 
 active中は送信経路も監視します。CAN bridgeの送信topic endpointが一時的に消失した
 場合は、間引いたWARNを出して復帰を待ちます。endpointの消失または送信workerの停滞が
@@ -341,7 +344,7 @@ ros2 topic pub --rate 20 \
 | 設定 | 動作 |
 |---|---|
 | `can_timeout_ticks` | hostからの指令が途絶えるとモーターがReset modeへ移行 |
-| `feedback_timeout_ms` | モーターからのfeedbackが途絶えるとHardwareがERRORを返す |
+| `feedback_timeout_ms` | feedbackをstaleと判定。`fail_on_feedback_timeout=true`の場合にERRORを返す |
 | `transmit_failure_timeout_ms` | 送信endpoint消失またはsender停滞が続くとHardwareがERRORを返す |
 | `shutdown_stop_repetitions` | ゼロ指令と停止指令を繰り返し送信 |
 | `shutdown_confirmation_timeout_ms` | Reset modeのfeedbackを待機 |

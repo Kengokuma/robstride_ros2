@@ -17,7 +17,8 @@ struct DriverSettings
   std::chrono::milliseconds feedback_timeout{3000};
   bool fail_on_feedback_timeout{true};
   std::chrono::milliseconds transmit_failure_timeout{1000};
-  std::chrono::milliseconds recovery_timeout{500};
+  // Zero means keep retrying until the motor reports Run mode.
+  std::chrono::milliseconds recovery_timeout{0};
   std::chrono::milliseconds recovery_retry_interval{100};
   bool clear_faults_on_start{true};
   bool set_zero_on_start{false};
@@ -26,6 +27,8 @@ struct DriverSettings
   std::chrono::milliseconds stop_confirmation_timeout{300};
   std::chrono::milliseconds connection_timeout{3000};
   std::chrono::milliseconds startup_confirmation_timeout{500};
+  // Zero means wait for motor responses until ROS is shutting down.
+  std::chrono::milliseconds startup_recovery_timeout{0};
   int startup_retries{3};
 };
 

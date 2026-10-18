@@ -134,28 +134,56 @@ bool RobStrideDriver::start()
     return false;
   }
 
-  for (auto & joint : joints_) {
-    if (settings_.clear_faults_on_start) {
-      transport_->send_transaction(make_stop(joint.can_id, settings_.host_id, true));
+  const auto startup_deadline = settings_.startup_recovery_timeout.count() == 0 ?
+    std::chrono::steady_clock::time_point::max() :
+    std::chrono::steady_clock::now() + settings_.startup_recovery_timeout;
+  bool parameters_confirmed = false;
+  while (!parameters_confirmed && rclcpp::ok() &&
+    std::chrono::steady_clock::now() < startup_deadline)
+  {
+    parameters_confirmed = true;
+    for (auto & joint : joints_) {
+      if (settings_.clear_faults_on_start) {
+        transport_->send_transaction(make_stop(joint.can_id, settings_.host_id, true));
+      }
+      if (joint.can_timeout_ticks == 0) {
+        RCLCPP_WARN(
+          logger_, "Joint '%s': motor CAN watchdog configuration is disabled",
+          joint.name.c_str());
+      }
+      if ((joint.can_timeout_ticks != 0 &&
+        !write_and_confirm_parameter(joint, kIndexCanTimeout, joint.can_timeout_ticks)) ||
+        !write_and_confirm_parameter(joint, kIndexRunMode, 0))
+      {
+        parameters_confirmed = false;
+        break;
+      }
     }
-    if (joint.can_timeout_ticks == 0) {
-      RCLCPP_WARN(
-        logger_, "Joint '%s': motor CAN watchdog configuration is disabled",
-        joint.name.c_str());
-    }
-    if ((joint.can_timeout_ticks != 0 &&
-      !write_and_confirm_parameter(joint, kIndexCanTimeout, joint.can_timeout_ticks)) ||
-      !write_and_confirm_parameter(joint, kIndexRunMode, 0))
+    if (!parameters_confirmed && rclcpp::ok() &&
+      std::chrono::steady_clock::now() < startup_deadline)
     {
-      disable_all();
-      return false;
+      RCLCPP_WARN(
+        logger_, "Motor startup parameters are not confirmed; retrying while waiting for motor "
+        "response");
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+  }
+  if (!parameters_confirmed) {
+    if (rclcpp::ok()) {
+      RCLCPP_ERROR(
+        logger_, "Motor startup parameters were not confirmed before the startup recovery "
+        "deadline");
+    }
+    disable_all();
+    return false;
+  }
+  for (auto & joint : joints_) {
     if (settings_.set_zero_on_start) {
       transport_->send_transaction(make_set_zero(joint.can_id, settings_.host_id));
     }
   }
 
-  if (!enable_and_confirm_all()) {
+  if (!enable_and_confirm_all(startup_deadline)) {
     disable_all();
     return false;
   }
@@ -631,9 +659,11 @@ bool RobStrideDriver::write_and_confirm_parameter(
   return false;
 }
 
-bool RobStrideDriver::enable_and_confirm_all()
+bool RobStrideDriver::enable_and_confirm_all(std::chrono::steady_clock::time_point deadline)
 {
-  for (int attempt = 1; attempt <= settings_.startup_retries; ++attempt) {
+  int attempt = 0;
+  while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+    ++attempt;
     const auto requested_at = std::chrono::steady_clock::now();
     for (const auto & joint : joints_) {
       transport_->send_transaction(make_enable(joint.can_id, settings_.host_id));
@@ -642,8 +672,11 @@ bool RobStrideDriver::enable_and_confirm_all()
     }
 
     std::unique_lock<std::mutex> lock(state_mutex_);
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+      deadline - std::chrono::steady_clock::now());
+    if (remaining <= std::chrono::milliseconds::zero()) {break;}
     const bool confirmed = feedback_condition_.wait_for(
-      lock, settings_.startup_confirmation_timeout,
+      lock, std::min(settings_.startup_confirmation_timeout, remaining),
       [this, requested_at]() {
         return std::all_of(joints_.begin(), joints_.end(), [requested_at](const JointData & joint) {
           return joint.feedback_status.received &&
@@ -653,10 +686,12 @@ bool RobStrideDriver::enable_and_confirm_all()
       });
     if (confirmed) {return true;}
     RCLCPP_WARN(
-      logger_, "Motor enable confirmation attempt %d/%d failed",
-      attempt, settings_.startup_retries);
+      logger_, "Motor enable confirmation attempt %d failed; retrying while waiting for motor "
+      "response", attempt);
   }
-  RCLCPP_ERROR(logger_, "Not all motors entered Run mode");
+  if (rclcpp::ok()) {
+    RCLCPP_ERROR(logger_, "Not all motors entered Run mode before the startup deadline");
+  }
   return false;
 }
 
