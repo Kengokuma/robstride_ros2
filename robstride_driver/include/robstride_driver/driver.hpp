@@ -40,6 +40,7 @@ public:
   void stop() noexcept;
   bool update_state();
   void request_recovery(size_t index);
+  bool set_zero(size_t index, std::string * error = nullptr);
   std::array<uint64_t, 4> command_gate_status() const;
   void release_command_gate(uint64_t epoch);
   bool send_commands();
@@ -104,6 +105,7 @@ private:
   uint64_t activated_epoch_{0};
   uint64_t release_epoch_{0};
   bool command_gate_closed_{true};
+  bool calibration_in_progress_{false};
   std::atomic<bool> active_{false};
   std::atomic<bool> command_rejected_{false};
   std::atomic<bool> feedback_available_{false};

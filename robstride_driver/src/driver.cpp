@@ -357,6 +357,73 @@ void RobStrideDriver::latch_command_gate_locked()
   release_epoch_ = 0;
 }
 
+bool RobStrideDriver::set_zero(size_t index, std::string * error)
+{
+  std::unique_lock<std::mutex> lock(state_mutex_);
+  const auto fail = [&](const char * message) {
+      if (error) {*error = message;}
+      return false;
+    };
+  if (index >= joints_.size()) {return fail("Unknown joint");}
+  if (!active_ || !transport_ || !settings_.allow_partial_start ||
+    !settings_.managed_command_gate)
+  {
+    return fail("Zero calibration requires active partial hardware with a managed command gate");
+  }
+  if (calibration_in_progress_) {return fail("Another zero calibration is in progress");}
+  if (!command_gate_closed_ || synchronized_epoch_ != gate_epoch_ || gate_epoch_ == 0 ||
+    std::any_of(joints_.begin(), joints_.end(), [](const JointData & joint) {
+      return joint.claimed.position || joint.claimed.velocity || joint.claimed.effort;
+    }))
+  {
+    return fail("Stop all RobStride command controllers and wait for the synchronized gate");
+  }
+  auto & joint = joints_[index];
+  const auto now = std::chrono::steady_clock::now();
+  if (!joint.initialized || !joint.feedback_status.received ||
+    now - joint.feedback_status.timestamp > settings_.feedback_timeout ||
+    joint.feedback.fault_flags != 0 || !std::isfinite(joint.feedback.velocity) ||
+    std::abs(joint.feedback.velocity * joint.gear_ratio) > 0.2)
+  {
+    return fail("Target motor must have fresh, fault-free, stationary feedback");
+  }
+  if (!joint.command_limits.contains_position(joint.position_offset)) {
+    return fail("The configured position offset is outside operational limits");
+  }
+  calibration_in_progress_ = true;
+  latch_command_gate_locked();
+  last_position_targets_[index].reset();
+  joint.position_sync_pending = true;
+  try {
+    transport_->send_transaction(make_set_zero(joint.can_id, settings_.host_id));
+    // Wait beyond the immediate reply to exclude feedback queued before zeroing.
+    const auto confirm_after = now + std::chrono::milliseconds(50);
+    const auto deadline = now + std::chrono::seconds(2);
+    const bool confirmed = feedback_condition_.wait_until(lock, deadline, [&]() {
+      return !active_ || (joint.feedback_status.timestamp > confirm_after &&
+             joint.feedback.fault_flags == 0 &&
+             std::isfinite(joint.feedback.position) &&
+             std::abs((joint.feedback.position - joint.position_offset) * joint.gear_ratio) < 0.02 &&
+             std::abs(joint.feedback.velocity * joint.gear_ratio) < 0.2);
+    });
+    const bool success = confirmed && active_ &&
+      std::chrono::steady_clock::now() - joint.feedback_status.timestamp <= settings_.feedback_timeout;
+    joint.state = joint.feedback;
+    joint.command.position = joint.feedback.position;
+    joint.command.velocity = 0.0;
+    joint.command.effort = 0.0;
+    last_position_targets_[index].reset();
+    latch_command_gate_locked();
+    calibration_in_progress_ = false;
+    if (!success) {return fail("Zero position was not confirmed; keep calibration paused");}
+    return true;
+  } catch (const std::exception & exception) {
+    calibration_in_progress_ = false;
+    if (error) {*error = exception.what();}
+    return false;
+  }
+}
+
 std::array<uint64_t, 4> RobStrideDriver::command_gate_status() const
 {
   std::lock_guard<std::mutex> lock(state_mutex_);
@@ -499,6 +566,7 @@ bool RobStrideDriver::send_commands()
     // sole producer; state_mutex_ is released before the batch takes the transport queue lock.
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (!active_) {return true;}
+    if (calibration_in_progress_) {return true;}
     if (settings_.managed_command_gate && command_gate_closed_) {
       bool synchronized = release_epoch_ == gate_epoch_ && gate_epoch_ != 0 &&
         activated_epoch_ == gate_epoch_ && synchronized_epoch_ == gate_epoch_;
@@ -736,6 +804,12 @@ bool RobStrideDriver::apply_command_modes(
 {
   std::lock_guard<std::mutex> lock(state_mutex_);
   if (!validate_command_modes_locked(modes, error)) {return false;}
+  if (calibration_in_progress_ && std::any_of(modes.begin(), modes.end(),
+      [](const ClaimedInterfaces & mode) {return mode.position || mode.velocity || mode.effort;}))
+  {
+    if (error) {*error = "Cannot activate command interfaces during zero calibration";}
+    return false;
+  }
   if (settings_.managed_command_gate && !command_gate_closed_) {
     const bool was_claimed = std::any_of(joints_.begin(), joints_.end(),
       [](const JointData & joint) {return joint.claimed.position;});

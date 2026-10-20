@@ -5,6 +5,7 @@
 #include <cmath>
 #include <map>
 #include <limits>
+#include <future>
 #include <thread>
 #include "robstride_driver/driver.hpp"
 
@@ -24,6 +25,7 @@ void check_partial_operation(bool managed)
   std::array<int, 4> enable_count{};
   std::array<int, 4> stop_count{};
   std::array<int, 4> zero_gain_count{};
+  std::array<int, 4> zero_count{};
   std::array<double, 4> positions{{0, 0.2, 0.4, 0.6}};
   std::array<double, 4> last_target{};
   std::map<std::pair<int, int>, uint32_t> parameters;
@@ -52,6 +54,7 @@ void check_partial_operation(bool managed)
       } else {
         if (type == rs::kTypeEnable) {modes[id] = rs::kMotorModeRun; ++enable_count[id];}
         else if (type == rs::kTypeStop) {modes[id] = rs::kMotorModeReset; ++stop_count[id];}
+        else if (type == rs::kTypeSetZero) {positions[id] = 0.0; ++zero_count[id];}
         else if (type == rs::kTypeMotionControl) {
           // Zero-gain keepalives are not position commands.
           if (frame->data[4] || frame->data[5]) {
@@ -184,6 +187,33 @@ void check_partial_operation(bool managed)
   }
   driver.joints()[0].command.position = 0.25;
   ASSERT_TRUE(wait([&]() {return std::abs(last_target[1] - 0.25) < 0.001;}));
+  std::string zero_error;
+  EXPECT_FALSE(driver.set_zero(0, &zero_error));  // Active controller or unmanaged hardware.
+  EXPECT_EQ(zero_count[1], 0);
+  if (managed) {
+    ASSERT_TRUE(driver.apply_command_modes({{}, {}, {}}));
+    ASSERT_TRUE(wait([&]() {return driver.command_gate_status()[2] == 1;}));
+    EXPECT_FALSE(driver.set_zero(99, &zero_error));
+    EXPECT_FALSE(driver.set_zero(1, &zero_error));  // Offline motor.
+    driver.joints()[0].feedback.velocity = 1.0;
+    EXPECT_FALSE(driver.set_zero(0, &zero_error));  // Moving motor.
+    driver.joints()[0].feedback.velocity = 0.0;
+    auto zero_result = std::async(std::launch::async, [&]() {
+      return driver.set_zero(0, &zero_error);
+    });
+    ASSERT_TRUE(wait([&]() {return zero_count[1] == 1;}));
+    EXPECT_FALSE(driver.apply_command_modes({{true, false, false}, {}, {}}));
+    EXPECT_TRUE(wait([&]() {return zero_result.wait_for(0ms) == std::future_status::ready;}));
+    EXPECT_TRUE(zero_result.get()) << zero_error;
+    EXPECT_EQ(zero_count[3], 0);  // Only the selected CAN ID was zeroed.
+    EXPECT_EQ(driver.command_gate_status()[1], 1u);
+    ASSERT_TRUE(wait([&]() {return driver.command_gate_status()[2] == 1;}));
+    handshake();
+    EXPECT_NEAR(driver.joints()[0].command.position, 0.0, 0.001);
+    driver.joints()[0].command.position = 13.0;
+    ASSERT_TRUE(wait([&]() {return std::abs(last_target[1]) < 0.001;}));
+    EXPECT_NEAR(last_target[1], 0.0, 0.001);  // No pre-calibration cached target.
+  }
   connected[1] = false;
   const int before_disconnect = motion_count[3];
   ASSERT_TRUE(wait([&]() {return driver.joints()[0].state.ready == 0;}));

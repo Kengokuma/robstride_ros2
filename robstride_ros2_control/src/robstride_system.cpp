@@ -11,6 +11,7 @@
 #include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <std_msgs/msg/u_int64.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <rclcpp/logging.hpp>
 #include <rclcpp/executors/single_threaded_executor.hpp>
 
@@ -80,6 +81,24 @@ struct RobStrideSystem::Impl
     gate_publisher->publish(gate);
   }
 
+  bool initialize(robstride_driver::DriverConfiguration configuration)
+  {
+    if (!driver.initialize(std::move(configuration))) {return false;}
+    zero_services.clear();
+    for (size_t index = 0; index < driver.joints().size(); ++index) {
+      zero_services.push_back(node->create_service<std_srvs::srv::Trigger>(
+        "/robstride/set_zero/" + driver.joints()[index].name,
+        [this, index](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+          response->success = driver.set_zero(index, &response->message);
+          if (response->success) {
+            response->message = "Motor zero confirmed; command gate remains closed";
+          }
+        }));
+    }
+    return true;
+  }
+
   void publish_error(bool error)
   {
     std_msgs::msg::Bool msg;
@@ -94,6 +113,7 @@ struct RobStrideSystem::Impl
   rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr gate_publisher;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr error_publisher;
   rclcpp::Subscription<std_msgs::msg::UInt64>::SharedPtr gate_subscription;
+  std::vector<rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr> zero_services;
   rclcpp::executors::SingleThreadedExecutor executor;
   std::thread executor_thread;
 };
@@ -115,7 +135,7 @@ hardware_interface::CallbackReturn RobStrideSystem::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
   try {
-    return impl_->driver.initialize(
+    return impl_->initialize(
       parse_driver_configuration(params.hardware_info)) ?
            hardware_interface::CallbackReturn::SUCCESS : hardware_interface::CallbackReturn::ERROR;
   } catch (const std::exception & error) {
@@ -134,7 +154,7 @@ hardware_interface::CallbackReturn RobStrideSystem::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
   try {
-    return impl_->driver.initialize(
+    return impl_->initialize(
       parse_driver_configuration(info)) ?
            hardware_interface::CallbackReturn::SUCCESS : hardware_interface::CallbackReturn::ERROR;
   } catch (const std::exception & error) {

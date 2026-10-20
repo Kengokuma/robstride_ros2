@@ -1,5 +1,14 @@
 # robstride_ros2_control
 
+Each configured joint exposes a `std_srvs/srv/Trigger` service at
+`/robstride/set_zero/<joint_name>`. This low-level operation requires all command
+controllers to be stopped and the managed gate synchronized; support the arm
+externally before stopping controllers. It verifies fresh zero feedback and leaves
+the command gate closed. Applications must pause command forwarding and automatic
+recovery, then explicitly resynchronize controller targets before resuming.
+The src2026 workspace provides `/arm_calibration/<joint_name>/set_zero` and
+`/arm_calibration/resume` to coordinate these steps.
+
 `robstride_ros2_control` exposes RobStride actuators as a ROS 2
 `hardware_interface::SystemInterface`. One component can manage multiple motor
 IDs on one CAN bus, and each joint can independently use position, velocity, or

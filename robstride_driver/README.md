@@ -50,6 +50,13 @@ readiness. If no valid history exists, a representable measured position is used
 This behavior does not change communication-loss, motor-fault, or explicit-stop
 handling, and does not guarantee holding torque without power or CAN delivery.
 
+`set_zero(index, error)` sends Type 6 only while active managed partial hardware
+has no claimed command interfaces and its command gate is closed and synchronized.
+It rejects absent, stale, faulty, or moving target feedback. The driver blocks new
+command claims during calibration, discards the old position history, and waits up
+to two seconds for fresh stationary feedback near the configured position offset.
+The gate stays closed on success or failure; this call does not resume motion.
+
 Most users should integrate this library through the
 [`robstride_ros2_control`](https://github.com/s2015-turtle/robstride_ros2/tree/main/robstride_ros2_control)
 Hardware Component. See the
