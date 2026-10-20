@@ -277,9 +277,13 @@ void test_command_limits_reject_without_clamping()
 
   driver.joints()[0].command.position = 2.5;
   const auto before_invalid = motor.motion_count();
-  require(!driver.send_commands(), "out-of-range position command was accepted");
-  require(!driver.send_commands(), "rejected command was silently retried");
-  require(motor.motion_count() == before_invalid, "rejected command was clamped and sent");
+  require(driver.send_commands(), "bad position target dropped holding torque");
+  require(wait_until([&]() {return motor.motion_count() > before_invalid;}),
+    "holding frame was not refreshed");
+  require(motor.last_motion_frame()->data == frame->data,
+    "bad position target changed the last valid holding frame");
+  driver.joints()[0].command.position = 0.4;
+  require(driver.send_commands(), "valid command failed after rejected position");
   driver.stop();
   driver.close();
 }

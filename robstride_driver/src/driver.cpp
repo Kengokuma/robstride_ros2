@@ -83,6 +83,7 @@ bool RobStrideDriver::initialize(DriverConfiguration configuration)
   runtime_events_.clear();
   runtime_events_.reserve(joints_.size());
   command_snapshot_.resize(joints_.size());
+  last_position_targets_.assign(joints_.size(), std::nullopt);
   recovery_updates_.clear();
   recovery_updates_.reserve(joints_.size());
   for (size_t index = 0; index < joints_.size(); ++index) {
@@ -127,6 +128,7 @@ void RobStrideDriver::close() noexcept
 
 bool RobStrideDriver::start()
 {
+  std::fill(last_position_targets_.begin(), last_position_targets_.end(), std::nullopt);
   if (!transport_ || !transport_->wait_for_endpoints(settings_.connection_timeout)) {
     RCLCPP_ERROR(
       logger_, "Timed out waiting for CAN bridge endpoints on '%s' and '%s'",
@@ -384,6 +386,7 @@ bool RobStrideDriver::update_partial_state()
       const bool running = fresh && joint.feedback_status.mode == kMotorModeRun &&
         joint.feedback.fault_flags == 0;
       if (!running && joint.initialized) {
+        last_position_targets_[index].reset();
         if (settings_.managed_command_gate) {latch_command_gate_locked();}
         joint.initialized = false;
         joint.initialization_stage = 0;
@@ -522,9 +525,9 @@ bool RobStrideDriver::send_commands()
     command_snapshot_.clear();
     for (size_t joint_index = 0; joint_index < joints_.size(); ++joint_index) {
       auto & joint = joints_[joint_index];
+      bool holding_position = false;
       if (settings_.allow_partial_start) {
-        if (!joint.state.ready || joint.state.fault || !joint.initialized ||
-          (joint.claimed.position && !std::isfinite(joint.command.position))) {continue;}
+        if (!joint.state.ready || joint.state.fault || !joint.initialized) {continue;}
         if (joint.claimed.position && joint.position_sync_pending) {
           if (!std::isfinite(joint.command.position) ||
             std::abs(joint.command.position - joint.state.position) > 0.01) {continue;}
@@ -538,11 +541,25 @@ bool RobStrideDriver::send_commands()
             std::to_string(maximum) + "]";
         };
       if (joint.claimed.position &&
-        !joint.command_limits.contains_position(joint.command.position))
+        (!joint.command_limits.contains_position(joint.command.position) ||
+        !joint.checked_joint_to_motor_position(joint.command.position)))
       {
-        reject("position", joint.command.position, joint.command_limits.position_min,
-          joint.command_limits.position_max);
-        break;
+        // A bad position target is not a hardware failure. Keep refreshing a valid
+        // holding target, without wrapping/clamping it or stopping healthy peers.
+        const double hold = last_position_targets_[joint_index].value_or(joint.state.position);
+        if (!joint.command_limits.contains_position(hold) ||
+          !joint.checked_joint_to_motor_position(hold))
+        {
+          RCLCPP_ERROR_THROTTLE(logger_, *log_clock_, 1000,
+            "Joint '%s': invalid position target and no representable holding target",
+            joint.name.c_str());
+          continue;
+        }
+        RCLCPP_WARN_THROTTLE(logger_, *log_clock_, 1000,
+          "Joint '%s': rejecting position target %.6f; holding last valid target %.6f",
+          joint.name.c_str(), joint.command.position, hold);
+        joint.command.position = hold;
+        holding_position = true;
       }
       if (joint.claimed.velocity &&
         !joint.command_limits.contains_velocity(joint.command.velocity))
@@ -562,7 +579,8 @@ bool RobStrideDriver::send_commands()
       const double motor_position = checked_position.value_or(
         std::numeric_limits<double>::quiet_NaN());
       const double motor_velocity =
-        joint.claimed.velocity ? joint.direction * joint.command.velocity * joint.gear_ratio : 0.0;
+        joint.claimed.velocity && !holding_position ?
+        joint.direction * joint.command.velocity * joint.gear_ratio : 0.0;
       const double motor_effort =
         joint.claimed.effort ? joint.joint_to_motor_effort(joint.command.effort) : 0.0;
       if (!checked_position)
@@ -591,6 +609,7 @@ bool RobStrideDriver::send_commands()
       const double kd = (joint.claimed.position || joint.claimed.velocity) ? joint.kd : 0.0;
       command_snapshot_.push_back(CanTransport::MotorFrame{joint_index, make_motion_command(
         joint.can_id, joint.limits, motor_position, motor_velocity, motor_effort, kp, kd)});
+      if (joint.claimed.position) {last_position_targets_[joint_index] = joint.command.position;}
     }
   }
   if (!rejection.empty()) {
@@ -728,6 +747,7 @@ bool RobStrideDriver::apply_command_modes(
     auto & joint = joints_[index];
     const auto previous = joint.claimed;
     joint.claimed = modes[index];
+    if (!joint.claimed.position || !previous.position) {last_position_targets_[index].reset();}
     if (!previous.position && joint.claimed.position) {
       joint.command.position = joint.feedback.position;
     }

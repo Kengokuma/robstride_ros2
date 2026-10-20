@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <map>
+#include <limits>
 #include <thread>
 #include "robstride_driver/driver.hpp"
 
@@ -21,6 +22,8 @@ void check_partial_operation(bool managed)
   std::array<int, 4> modes{};
   std::array<int, 4> motion_count{};
   std::array<int, 4> enable_count{};
+  std::array<int, 4> stop_count{};
+  std::array<int, 4> zero_gain_count{};
   std::array<double, 4> positions{{0, 0.2, 0.4, 0.6}};
   std::array<double, 4> last_target{};
   std::map<std::pair<int, int>, uint32_t> parameters;
@@ -48,13 +51,13 @@ void check_partial_operation(bool managed)
         for (int i = 0; i < 4; ++i) {reply.data[4 + i] = (value >> (i * 8)) & 0xff;}
       } else {
         if (type == rs::kTypeEnable) {modes[id] = rs::kMotorModeRun; ++enable_count[id];}
-        else if (type == rs::kTypeStop) {modes[id] = rs::kMotorModeReset;}
+        else if (type == rs::kTypeStop) {modes[id] = rs::kMotorModeReset; ++stop_count[id];}
         else if (type == rs::kTypeMotionControl) {
           // Zero-gain keepalives are not position commands.
           if (frame->data[4] || frame->data[5]) {
             ++motion_count[id];
             last_target[id] = rs::decode_u16((frame->data[0] << 8) | frame->data[1], -12, 12);
-          }
+          } else {++zero_gain_count[id];}
         } else {return;}
         reply.id = (rs::kTypeFeedback << 24) | (modes[id] << 22) | (id << 8) | 0xfd;
         const auto raw = rs::encode_u16(positions[id], -12, 12);
@@ -141,6 +144,46 @@ void check_partial_operation(bool managed)
   ASSERT_TRUE(wait([&]() {return driver.joints()[0].state.ready > 0.5;}));
   driver.joints()[0].command.position = driver.joints()[0].state.position;
   if (managed) {handshake();}
+  // Invalid positions must retain holding gains and keep healthy peers moving,
+  // without entering the hardware-error/recovery gate path.
+  driver.joints()[0].command.position = 0.3;
+  driver.joints()[2].command.position = 0.7;
+  ASSERT_TRUE(wait([&]() {
+    return std::abs(last_target[1] - 0.3) < 0.001 &&
+           std::abs(last_target[3] - 0.7) < 0.001;
+  }));
+  const auto stops_before_rejection = stop_count;
+  const auto zeros_before_rejection = zero_gain_count;
+  const auto gate_before_rejection = driver.command_gate_status();
+  for (const double invalid : {3.0, -3.0, 13.0, -13.0,
+      std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()})
+  {
+    const int held_count = motion_count[1];
+    const int peer_count = motion_count[3];
+    // Also exercise a target within operational limits but outside the wire range.
+    driver.joints()[0].command_limits.position_min = std::abs(invalid) > 12.0 ? -20.0 : -2.0;
+    driver.joints()[0].command_limits.position_max = std::abs(invalid) > 12.0 ? 20.0 : 2.0;
+    driver.joints()[0].command.position = invalid;
+    driver.joints()[2].command.position += 0.01;
+    ASSERT_TRUE(wait([&]() {
+      driver.joints()[0].command.position = invalid;
+      return motion_count[1] > held_count && motion_count[3] > peer_count &&
+             std::abs(last_target[3] - driver.joints()[2].command.position) < 0.001;
+    }));
+    for (int cycle_index = 0; cycle_index < 20; ++cycle_index) {
+      driver.joints()[0].command.position = invalid;
+      cycle();
+    }
+    EXPECT_GT(motion_count[1], held_count);
+    EXPECT_GT(motion_count[3], peer_count);
+    EXPECT_NEAR(last_target[1], 0.3, 0.001);
+    EXPECT_NEAR(last_target[3], driver.joints()[2].command.position, 0.001);
+    EXPECT_EQ(stop_count, stops_before_rejection);
+    EXPECT_EQ(zero_gain_count, zeros_before_rejection);
+    EXPECT_EQ(driver.command_gate_status(), gate_before_rejection);
+  }
+  driver.joints()[0].command.position = 0.25;
+  ASSERT_TRUE(wait([&]() {return std::abs(last_target[1] - 0.25) < 0.001;}));
   connected[1] = false;
   const int before_disconnect = motion_count[3];
   ASSERT_TRUE(wait([&]() {return driver.joints()[0].state.ready == 0;}));

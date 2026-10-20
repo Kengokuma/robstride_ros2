@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -96,6 +97,7 @@ private:
   std::condition_variable feedback_condition_;
   std::vector<RuntimeEvent> runtime_events_;
   std::vector<CanTransport::MotorFrame> command_snapshot_;
+  std::vector<std::optional<double>> last_position_targets_;
   std::vector<CanTransport::RecoveryUpdate> recovery_updates_;
   uint64_t gate_epoch_{0};
   uint64_t synchronized_epoch_{0};

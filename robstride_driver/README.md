@@ -40,6 +40,16 @@ unexpectedly stopped worker is propagated through the Hardware Component's
 check because DDS publication alone cannot prove physical CAN delivery or motor
 execution.
 
+An invalid position command (including a nonfinite value or a position outside
+the transformed CAN range) retains the last valid position target with holding
+gains. It does not wrap to the opposite endpoint, latch a hardware error, or stop
+healthy peers. The held position is refreshed on subsequent writes; valid
+commands can resume without a recovery cycle. Position history is cleared when
+position ownership changes, hardware starts, or a partial-operation motor loses
+readiness. If no valid history exists, a representable measured position is used.
+This behavior does not change communication-loss, motor-fault, or explicit-stop
+handling, and does not guarantee holding torque without power or CAN delivery.
+
 Most users should integrate this library through the
 [`robstride_ros2_control`](https://github.com/s2015-turtle/robstride_ros2/tree/main/robstride_ros2_control)
 Hardware Component. See the
