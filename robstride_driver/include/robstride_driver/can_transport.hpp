@@ -54,6 +54,7 @@ public:
   {
     size_t motor_index{0};
     std::optional<Frame> frame;
+    bool suspend{false};
   };
 
   CanTransport(

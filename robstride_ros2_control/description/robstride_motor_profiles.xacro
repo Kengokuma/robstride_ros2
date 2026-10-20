@@ -13,6 +13,14 @@
     <state_interface name="effort"/>
     <state_interface name="temperature"/>
     <state_interface name="fault"/>
+    <state_interface name="online"/>
+    <state_interface name="ready"/>
+  </xacro:macro>
+
+  <xacro:macro name="robstride_resilience_params">
+    <param name="feedback_timeout_ms">500</param>
+    <param name="fail_on_feedback_timeout">true</param>
+    <param name="set_zero_on_activate">false</param>
   </xacro:macro>
 
   <xacro:macro name="robstride_command_limits" params="position_min position_max velocity_min velocity_max effort_min effort_max">

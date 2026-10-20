@@ -276,7 +276,7 @@ JointData parse_joint(const hardware_interface::ComponentInfo & info)
       hardware_interface::HW_IF_EFFORT};
     const std::set<std::string> allowed_states{
       hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY,
-      hardware_interface::HW_IF_EFFORT, "temperature", "fault"};
+      hardware_interface::HW_IF_EFFORT, "temperature", "fault", "online", "ready"};
     std::set<std::string> actual_states;
     for (const auto & interface : info.state_interfaces) {actual_states.insert(interface.name);}
     if (!std::includes(
@@ -324,6 +324,13 @@ try
     integer("feedback_timeout_ms", "3000"));
   settings.fail_on_feedback_timeout = parse_bool(
     hardware_parameter_or(info, "fail_on_feedback_timeout", "false"));
+  settings.managed_command_gate = parse_bool(
+    hardware_parameter_or(info, "managed_command_gate", "false"));
+  settings.allow_partial_start = parse_bool(
+    hardware_parameter_or(info, "allow_partial_start", "false"));
+  if (settings.managed_command_gate && !settings.allow_partial_start) {
+    throw std::runtime_error("managed_command_gate requires allow_partial_start");
+  }
   settings.transmit_failure_timeout = std::chrono::milliseconds(
     integer("transmit_failure_timeout_ms", "1000"));
   settings.recovery_timeout = std::chrono::milliseconds(

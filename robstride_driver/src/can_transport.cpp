@@ -234,7 +234,7 @@ void CanTransport::apply_recovery_updates(const std::vector<RecoveryUpdate> & up
   const uint64_t generation = active_generation_;
   for (const auto & update : updates) {
     if (update.motor_index < options_.motor_count) {
-      recovery_active_[update.motor_index] = update.frame.has_value();
+      recovery_active_[update.motor_index] = update.frame.has_value() || update.suspend;
     }
   }
   {
@@ -251,10 +251,12 @@ void CanTransport::apply_recovery_updates(const std::vector<RecoveryUpdate> & up
     for (const auto & update : updates) {
       if (update.motor_index >= options_.motor_count) {continue;}
       if (update.frame) {
+        pending_motion_frames_[update.motor_index].reset();
         pending_recovery_frames_[update.motor_index] =
           ActiveFrame{*update.frame, update.motor_index, generation};
         enqueued = true;
       } else {
+        if (update.suspend) {pending_motion_frames_[update.motor_index].reset();}
         pending_recovery_frames_[update.motor_index].reset();
       }
     }

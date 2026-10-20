@@ -161,6 +161,7 @@ void test_complete_lifecycle_and_recovery()
 
   const uint64_t enables_before = motor.enable_count();
   motor.report_reset();
+  driver.request_recovery(0);
   require(wait_until([&]() {
     driver.update_state();
     return motor.enable_count() > enables_before;
@@ -510,6 +511,7 @@ void test_two_motor_fault_isolation(bool fail_on_timeout)
   const auto first_enables = first.enable_count();
   const auto second_enables = second.enable_count();
   first.report_reset();
+  driver.request_recovery(0);
   require(wait_until([&]() {
     cycle();
     require(driver.update_state(), "single-motor Reset failed before recovery deadline");
@@ -534,6 +536,7 @@ void test_two_motor_fault_isolation(bool fail_on_timeout)
     second.watchdog_reset_count() == second_resets && second.motion_count() > second_motion,
     "unrelated motor traffic refreshed the lost motor watchdog or reset the healthy motor");
   first.set_commands_enabled(true);
+  driver.request_recovery(0);
   require(wait_until([&]() {
     cycle();
     // A stale read may precede delivery of the watchdog Reset feedback.
@@ -563,6 +566,7 @@ void test_concurrent_control_recovery_and_shutdown()
 
   const uint64_t enables_before = motor.enable_count();
   motor.report_reset();
+  driver.request_recovery(0);
   const bool recovery_observed =
     wait_until([&]() {return motor.enable_count() > enables_before;});
   driver.stop();

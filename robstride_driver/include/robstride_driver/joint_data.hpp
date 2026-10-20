@@ -20,6 +20,9 @@ struct StateValues
   double effort{std::numeric_limits<double>::quiet_NaN()};
   double temperature{std::numeric_limits<double>::quiet_NaN()};
   double fault{0.0};
+  double online{0.0};
+  double ready{0.0};
+  double fault_flags{0.0};
 };
 
 struct CommandValues
@@ -140,6 +143,12 @@ struct JointData
   FeedbackStatus feedback_status{};
   ParameterStatus parameter_status{};
   RecoveryState recovery{};
+  bool recovery_requested{false};
+  int initialization_stage{0};
+  bool initialized{false};
+  bool position_sync_pending{true};
+  std::chrono::steady_clock::time_point initialization_requested_at{};
+  std::chrono::steady_clock::time_point initialization_attempt_at{};
 
   // Every clamp/encoding range used by a neutral command must preserve zero.
   // Position is intentionally excluded: its origin need not be in the operating range.

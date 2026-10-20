@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -37,6 +38,9 @@ public:
   bool start();
   void stop() noexcept;
   bool update_state();
+  void request_recovery(size_t index);
+  std::array<uint64_t, 4> command_gate_status() const;
+  void release_command_gate(uint64_t epoch);
   bool send_commands();
   std::vector<ClaimedInterfaces> command_modes() const;
   std::vector<bool> feedback_received() const;
@@ -63,6 +67,8 @@ private:
     int attempts{0};
   };
 
+  void latch_command_gate_locked();
+  bool update_partial_state();
   void receive_frame(can_msgs::msg::Frame::ConstSharedPtr msg);
   bool write_and_confirm_parameter(JointData & joint, uint16_t index, uint32_t value);
   bool enable_and_confirm_all(std::chrono::steady_clock::time_point deadline);
@@ -91,8 +97,14 @@ private:
   std::vector<RuntimeEvent> runtime_events_;
   std::vector<CanTransport::MotorFrame> command_snapshot_;
   std::vector<CanTransport::RecoveryUpdate> recovery_updates_;
+  uint64_t gate_epoch_{0};
+  uint64_t synchronized_epoch_{0};
+  uint64_t activated_epoch_{0};
+  uint64_t release_epoch_{0};
+  bool command_gate_closed_{true};
   std::atomic<bool> active_{false};
   std::atomic<bool> command_rejected_{false};
+  std::atomic<bool> feedback_available_{false};
   std::chrono::steady_clock::time_point activated_at_{};
   std::shared_ptr<rclcpp::Clock> log_clock_;
   std::unique_ptr<CanTransport> transport_;

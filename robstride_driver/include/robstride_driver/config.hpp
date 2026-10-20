@@ -16,6 +16,8 @@ struct DriverSettings
   CanTransportOptions transport{};
   std::chrono::milliseconds feedback_timeout{3000};
   bool fail_on_feedback_timeout{true};
+  bool allow_partial_start{false};
+  bool managed_command_gate{false};
   std::chrono::milliseconds transmit_failure_timeout{1000};
   // Zero means keep retrying until the motor reports Run mode.
   std::chrono::milliseconds recovery_timeout{0};

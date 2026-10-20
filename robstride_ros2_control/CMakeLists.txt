@@ -12,6 +12,7 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(robstride_driver REQUIRED)
+find_package(std_msgs REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/command_mode.cpp
@@ -30,7 +31,7 @@ if(hardware_interface_VERSION VERSION_GREATER_EQUAL "5.0.0")
 endif()
 if(COMMAND ament_target_dependencies)
   ament_target_dependencies(${PROJECT_NAME}
-    hardware_interface pluginlib rclcpp rclcpp_lifecycle
+    hardware_interface pluginlib rclcpp rclcpp_lifecycle std_msgs
   )
   target_link_libraries(${PROJECT_NAME} robstride_driver::robstride_driver)
 else()
@@ -39,6 +40,7 @@ else()
     pluginlib::pluginlib
     rclcpp::rclcpp
     rclcpp_lifecycle::rclcpp_lifecycle
+    ${std_msgs_TARGETS}
     robstride_driver::robstride_driver
   )
 endif()
@@ -69,6 +71,6 @@ endif()
 ament_export_include_directories(include)
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
-  hardware_interface pluginlib rclcpp rclcpp_lifecycle robstride_driver
+  hardware_interface pluginlib rclcpp rclcpp_lifecycle robstride_driver std_msgs
 )
 ament_package()

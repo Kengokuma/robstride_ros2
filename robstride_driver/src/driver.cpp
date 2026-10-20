@@ -134,6 +134,28 @@ bool RobStrideDriver::start()
     return false;
   }
 
+  if (settings_.allow_partial_start) {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (settings_.managed_command_gate) {latch_command_gate_locked();}
+      for (auto & joint : joints_) {
+        joint.initialized = false;
+        joint.initialization_stage = 0;
+        joint.recovery_requested = false;
+        joint.position_sync_pending = true;
+        joint.command = CommandValues{};
+        // A write error can skip perform_command_mode_switch while the component is
+        // unavailable. No controller owns these interfaces at hardware activation.
+        joint.claimed = ClaimedInterfaces{};
+      }
+    }
+    transport_->enable_active_commands();
+    activated_at_ = std::chrono::steady_clock::now();
+    command_rejected_ = false;
+    active_ = true;
+    return true;
+  }
+
   const auto startup_deadline = settings_.startup_recovery_timeout.count() == 0 ?
     std::chrono::steady_clock::time_point::max() :
     std::chrono::steady_clock::now() + settings_.startup_recovery_timeout;
@@ -192,11 +214,13 @@ bool RobStrideDriver::start()
     for (auto & joint : joints_) {
       joint.state = joint.feedback;
       joint.recovery = RecoveryState{};
+      joint.recovery_requested = false;
     }
   }
   transport_->enable_active_commands();
   activated_at_ = std::chrono::steady_clock::now();
   command_rejected_ = false;
+  feedback_available_ = false;
   active_ = true;
   return true;
 }
@@ -215,6 +239,7 @@ bool RobStrideDriver::update_state()
 {
   if (!active_) {return true;}
   if (!check_transport_health()) {return false;}
+  if (settings_.allow_partial_start) {return update_partial_state();}
   const auto now = std::chrono::steady_clock::now();
   bool read_failed = false;
   runtime_events_.clear();
@@ -227,8 +252,13 @@ bool RobStrideDriver::update_state()
     for (size_t joint_index = 0; joint_index < joints_.size(); ++joint_index) {
       auto & joint = joints_[joint_index];
       if (joint.feedback_status.received) {joint.state = joint.feedback;}
+      joint.state.online = joint.feedback_status.received &&
+        now - joint.feedback_status.timestamp <= settings_.feedback_timeout ? 1.0 : 0.0;
+      joint.state.ready = joint.state.online && joint.feedback_status.mode == kMotorModeRun ? 1.0 : 0.0;
+      joint.state.fault = joint.feedback.fault_flags != 0 ? 1.0 : 0.0;
+      joint.state.fault_flags = static_cast<double>(joint.feedback.fault_flags);
 
-      if (joint.feedback_status.received) {
+      if (joint.feedback_status.received && joint.recovery_requested) {
         const int attempts_before_update = joint.recovery.attempts;
         const auto action = joint.recovery.update(
           joint.feedback_status.mode, now, settings_.recovery_timeout,
@@ -239,6 +269,7 @@ bool RobStrideDriver::update_state()
             static_cast<uint64_t>(joint.recovery.attempts - attempts_before_update));
         }
         if (action == RecoveryAction::recovered) {
+          joint.recovery_requested = false;
           recovery_updates_.push_back(
             CanTransport::RecoveryUpdate{joint_index, std::nullopt});
           runtime_events_.push_back(
@@ -249,8 +280,8 @@ bool RobStrideDriver::update_state()
             RuntimeEvent{
               RuntimeEventKind::recovery_failed, joint_index, joint.recovery.detected_mode,
               joint.recovery.attempts});
-          read_failed = true;
-          break;
+          joint.state.online = 0.0;
+          joint.state.ready = 0.0;
         } else if (action == RecoveryAction::send_enable) {
           if (joint.recovery.attempts == 1) {
             runtime_events_.push_back(
@@ -270,17 +301,189 @@ bool RobStrideDriver::update_state()
         const auto reference =
           joint.feedback_status.received ? joint.feedback_status.timestamp : activated_at_;
         if (now - reference > settings_.feedback_timeout) {
+          joint.state.online = 0.0;
+          joint.state.ready = 0.0;
           runtime_events_.push_back(
             RuntimeEvent{RuntimeEventKind::feedback_timeout, joint_index});
-          read_failed = true;
-          break;
         }
       }
+    }
+    bool all_feedback_fresh = true;
+    for (auto & joint : joints_) {
+      const bool fresh = joint.feedback_status.received &&
+        now - joint.feedback_status.timestamp <= settings_.feedback_timeout;
+      if (!fresh) {
+        all_feedback_fresh = false;
+        continue;
+      }
+      if (joint.state.online == 0.0) {
+        joint.state = joint.feedback;
+        joint.state.online = 1.0;
+        joint.state.ready = joint.feedback_status.mode == kMotorModeRun ? 1.0 : 0.0;
+        joint.state.fault = joint.feedback.fault_flags != 0 ? 1.0 : 0.0;
+        joint.state.fault_flags = joint.feedback.fault_flags;
+        joint.command.position = joint.state.position;
+      }
+    }
+    const bool was_feedback_available = feedback_available_.exchange(all_feedback_fresh);
+    if (all_feedback_fresh && !was_feedback_available) {
+      transport_->enable_active_commands();
+    }
+    if (!all_feedback_fresh) {
+      transport_->disable_active_commands();
     }
   }
   transport_->apply_recovery_updates(recovery_updates_);
   log_runtime_events();
   return !read_failed;
+}
+
+void RobStrideDriver::request_recovery(size_t index)
+{
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  if (index < joints_.size() && !joints_[index].initialized) {
+    joints_[index].recovery_requested = true;
+  }
+}
+
+void RobStrideDriver::latch_command_gate_locked()
+{
+  ++gate_epoch_;
+  command_gate_closed_ = true;
+  synchronized_epoch_ = 0;
+  activated_epoch_ = 0;
+  release_epoch_ = 0;
+}
+
+std::array<uint64_t, 4> RobStrideDriver::command_gate_status() const
+{
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  return {gate_epoch_, command_gate_closed_ ? 1u : 0u,
+    synchronized_epoch_ == gate_epoch_ && gate_epoch_ != 0 ? 1u : 0u,
+    activated_epoch_ == gate_epoch_ && gate_epoch_ != 0 ? 1u : 0u};
+}
+
+void RobStrideDriver::release_command_gate(uint64_t epoch)
+{
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  if (epoch == gate_epoch_ && epoch != 0 && synchronized_epoch_ == epoch &&
+    activated_epoch_ == epoch) {release_epoch_ = epoch;}
+}
+
+bool RobStrideDriver::update_partial_state()
+{
+  const auto now = std::chrono::steady_clock::now();
+  std::vector<Frame> transactions;
+  recovery_updates_.clear();
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (size_t index = 0; index < joints_.size(); ++index) {
+      auto & joint = joints_[index];
+      const bool fresh = joint.feedback_status.received &&
+        now - joint.feedback_status.timestamp <= settings_.feedback_timeout;
+      const bool running = fresh && joint.feedback_status.mode == kMotorModeRun &&
+        joint.feedback.fault_flags == 0;
+      if (!running && joint.initialized) {
+        if (settings_.managed_command_gate) {latch_command_gate_locked();}
+        joint.initialized = false;
+        joint.initialization_stage = 0;
+        joint.position_sync_pending = true;
+      }
+      if (joint.feedback_status.received) {joint.state = joint.feedback;}
+      joint.state.online = fresh ? 1.0 : 0.0;
+      joint.state.ready = running && joint.initialized ? 1.0 : 0.0;
+      joint.state.fault = joint.feedback.fault_flags != 0 ? 1.0 : 0.0;
+      joint.state.fault_flags = joint.feedback.fault_flags;
+      if (joint.state.ready) {continue;}
+      joint.command.position = joint.state.position;
+      joint.command.velocity = 0.0;
+      joint.command.effort = 0.0;
+      // A per-motor recovery marker drops queued motion without stopping other motors.
+      recovery_updates_.push_back(CanTransport::RecoveryUpdate{
+        index, std::nullopt, true});
+      if (!joint.recovery_requested) {continue;}
+      if (now - joint.initialization_attempt_at < settings_.recovery_retry_interval) {continue;}
+      joint.initialization_attempt_at = now;
+      auto & stage = joint.initialization_stage;
+      const auto & parameter = joint.parameter_status;
+      const bool confirmed = parameter.received && parameter.status == 0 &&
+        parameter.timestamp >= joint.initialization_requested_at;
+      if (stage == 0) {
+        transactions.push_back(make_stop(joint.can_id, settings_.host_id,
+          settings_.clear_faults_on_start));
+        joint.initialization_requested_at = now;
+        if (joint.can_timeout_ticks != 0) {
+          transactions.push_back(make_write_u32(joint.can_id, settings_.host_id,
+            kIndexCanTimeout, joint.can_timeout_ticks));
+          transactions.push_back(make_read_parameter(joint.can_id, settings_.host_id,
+            kIndexCanTimeout));
+          stage = 1;
+        } else {stage = 2;}
+      } else if (stage == 1) {
+        if (confirmed && parameter.index == kIndexCanTimeout &&
+          parameter.value == joint.can_timeout_ticks) {stage = 2;}
+        else if (now - joint.initialization_requested_at > settings_.startup_confirmation_timeout) {
+          stage = 0;
+        }
+      } else if (stage == 2) {
+        transactions.push_back(make_write_u8(joint.can_id, settings_.host_id, kIndexRunMode, 0));
+        transactions.push_back(make_read_parameter(joint.can_id, settings_.host_id, kIndexRunMode));
+        joint.initialization_requested_at = now;
+        stage = 3;
+      } else if (stage == 3) {
+        if (confirmed && parameter.index == kIndexRunMode && parameter.value == 0) {
+          transactions.push_back(make_enable(joint.can_id, settings_.host_id));
+          transactions.push_back(make_motion_command(joint.can_id, joint.limits,
+            0.0, 0.0, 0.0, 0.0, 0.0));
+          joint.initialization_requested_at = now;
+          stage = 4;
+        } else if (now - joint.initialization_requested_at > settings_.startup_confirmation_timeout) {
+          stage = 0;
+        }
+      } else if (stage == 4) {
+        if (running && joint.feedback_status.timestamp >= joint.initialization_requested_at &&
+          joint.command_limits.contains_position(joint.state.position)) {
+          joint.command.position = joint.state.position;
+          joint.position_sync_pending = true;
+          if (settings_.managed_command_gate) {latch_command_gate_locked();}
+          joint.initialized = true;
+          joint.recovery_requested = false;
+          joint.state.ready = 1.0;
+          recovery_updates_.back().suspend = false;
+        } else if (now - joint.initialization_requested_at > settings_.startup_confirmation_timeout) {
+          stage = 0;
+        }
+      }
+    }
+    if (settings_.managed_command_gate) {
+      const bool unclaimed = std::none_of(joints_.begin(), joints_.end(),
+        [](const JointData & joint) {return joint.claimed.position;});
+      bool any_ready = false;
+      for (auto & joint : joints_) {
+        if (joint.state.ready && joint.initialized) {
+          any_ready = true;
+          if (unclaimed) {joint.command.position = joint.state.position;}
+        }
+      }
+      if (unclaimed && any_ready) {synchronized_epoch_ = gate_epoch_;}
+      // Gate every motor until the manager completes a stop/sync/start cycle.
+      // Zero-gain keepalives preserve feedback/watchdog without a position target.
+      recovery_updates_.clear();
+      for (size_t index = 0; index < joints_.size(); ++index) {
+        const auto & joint = joints_[index];
+        if (command_gate_closed_ && joint.state.ready) {
+          recovery_updates_.push_back(CanTransport::RecoveryUpdate{index,
+            make_motion_command(joint.can_id, joint.limits, 0.0, 0.0, 0.0, 0.0, 0.0)});
+        } else {
+          recovery_updates_.push_back(CanTransport::RecoveryUpdate{index,
+            std::nullopt, !joint.state.ready});
+        }
+      }
+    }
+  }
+  transport_->apply_recovery_updates(recovery_updates_);
+  for (const auto & frame : transactions) {transport_->send_transaction(frame);}
+  return true;
 }
 
 bool RobStrideDriver::send_commands()
@@ -293,8 +496,42 @@ bool RobStrideDriver::send_commands()
     // sole producer; state_mutex_ is released before the batch takes the transport queue lock.
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (!active_) {return true;}
+    if (settings_.managed_command_gate && command_gate_closed_) {
+      bool synchronized = release_epoch_ == gate_epoch_ && gate_epoch_ != 0 &&
+        activated_epoch_ == gate_epoch_ && synchronized_epoch_ == gate_epoch_;
+      bool any_ready = false;
+      for (const auto & joint : joints_) {
+        if (!joint.state.ready || !joint.initialized) {continue;}
+        any_ready = true;
+        synchronized = synchronized && joint.claimed.position &&
+          std::isfinite(joint.command.position) &&
+          std::abs(joint.command.position - joint.state.position) <= 0.01;
+      }
+      if (synchronized && any_ready) {
+        for (auto & joint : joints_) {
+          if (joint.state.ready) {
+            joint.command.position = joint.state.position;
+            joint.position_sync_pending = false;
+          }
+        }
+        command_gate_closed_ = false;
+      }
+      return true;
+    }
+    if (!settings_.allow_partial_start && !feedback_available_) {return true;}
+    command_snapshot_.clear();
     for (size_t joint_index = 0; joint_index < joints_.size(); ++joint_index) {
-      const auto & joint = joints_[joint_index];
+      auto & joint = joints_[joint_index];
+      if (settings_.allow_partial_start) {
+        if (!joint.state.ready || joint.state.fault || !joint.initialized ||
+          (joint.claimed.position && !std::isfinite(joint.command.position))) {continue;}
+        if (joint.claimed.position && joint.position_sync_pending) {
+          if (!std::isfinite(joint.command.position) ||
+            std::abs(joint.command.position - joint.state.position) > 0.01) {continue;}
+          joint.command.position = joint.state.position;
+          joint.position_sync_pending = false;
+        }
+      }
       const auto reject = [&](const char * name, double value, double minimum, double maximum) {
           rejection = "Joint '" + joint.name + "': " + name + " command " +
             std::to_string(value) + " is outside [" + std::to_string(minimum) + ", " +
@@ -352,8 +589,8 @@ bool RobStrideDriver::send_commands()
       }
       const double kp = joint.claimed.position ? joint.kp : 0.0;
       const double kd = (joint.claimed.position || joint.claimed.velocity) ? joint.kd : 0.0;
-      command_snapshot_[joint_index].frame = make_motion_command(
-        joint.can_id, joint.limits, motor_position, motor_velocity, motor_effort, kp, kd);
+      command_snapshot_.push_back(CanTransport::MotorFrame{joint_index, make_motion_command(
+        joint.can_id, joint.limits, motor_position, motor_velocity, motor_effort, kp, kd)});
     }
   }
   if (!rejection.empty()) {
@@ -376,6 +613,9 @@ bool RobStrideDriver::check_transport_health()
 
   const auto health = transport_->health(settings_.transmit_failure_timeout);
   if (health.state == CanTransportHealthState::healthy) {return true;}
+  if (settings_.allow_partial_start &&
+    (health.state == CanTransportHealthState::bridge_unavailable ||
+    health.state == CanTransportHealthState::transmit_stalled)) {return true;}
 
   const auto duration_ms =
     std::chrono::duration_cast<std::chrono::milliseconds>(health.duration).count();
@@ -443,6 +683,7 @@ bool RobStrideDriver::validate_command_modes_locked(
     if (!status.received || status.timestamp > now ||
       now - status.timestamp > settings_.feedback_timeout)
     {
+      if (settings_.allow_partial_start) {continue;}
       if (error) {*error = "Joint '" + joint.name + "': position activation requires fresh feedback";}
       return false;
     }
@@ -476,6 +717,13 @@ bool RobStrideDriver::apply_command_modes(
 {
   std::lock_guard<std::mutex> lock(state_mutex_);
   if (!validate_command_modes_locked(modes, error)) {return false;}
+  if (settings_.managed_command_gate && !command_gate_closed_) {
+    const bool was_claimed = std::any_of(joints_.begin(), joints_.end(),
+      [](const JointData & joint) {return joint.claimed.position;});
+    const bool will_be_claimed = std::any_of(modes.begin(), modes.end(),
+      [](const ClaimedInterfaces & mode) {return mode.position;});
+    if (was_claimed && !will_be_claimed) {latch_command_gate_locked();}
+  }
   for (size_t index = 0; index < joints_.size(); ++index) {
     auto & joint = joints_[index];
     const auto previous = joint.claimed;
@@ -485,6 +733,11 @@ bool RobStrideDriver::apply_command_modes(
     }
     if (!previous.velocity && joint.claimed.velocity) {joint.command.velocity = 0.0;}
     if (!previous.effort && joint.claimed.effort) {joint.command.effort = 0.0;}
+  }
+  if (settings_.managed_command_gate) {
+    const bool any_position = std::any_of(joints_.begin(), joints_.end(),
+      [](const JointData & joint) {return joint.claimed.position;});
+    if (any_position && synchronized_epoch_ == gate_epoch_) {activated_epoch_ = gate_epoch_;}
   }
   return true;
 }
@@ -576,6 +829,7 @@ void RobStrideDriver::receive_frame(can_msgs::msg::Frame::ConstSharedPtr msg)
   joint.feedback.effort = joint.motor_to_joint_effort(decoded->effort);
   joint.feedback.temperature = decoded->temperature;
   joint.feedback.fault = decoded->fault_flags;
+  joint.feedback.fault_flags = decoded->fault_flags;
   joint.feedback_status.mode = decoded->mode;
   joint.feedback_status.received = true;
   joint.feedback_status.timestamp = received_at;

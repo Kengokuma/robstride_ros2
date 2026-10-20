@@ -6,7 +6,13 @@
 
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 #include <pluginlib/class_list_macros.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/u_int8_multi_array.hpp>
+#include <std_msgs/msg/u_int64_multi_array.hpp>
+#include <std_msgs/msg/u_int64.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <rclcpp/logging.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 
 #include "robstride_ros2_control/command_mode.hpp"
 #include "robstride_ros2_control/driver_config.hpp"
@@ -33,9 +39,63 @@ std::vector<CommandModeState> current_command_modes(robstride_driver::RobStrideD
 struct RobStrideSystem::Impl
 {
   Impl()
-  : driver(rclcpp::get_logger("RobStrideSystem")) {}
+  : driver(rclcpp::get_logger("RobStrideSystem")),
+    node(std::make_shared<rclcpp::Node>("robstride_health_publisher")),
+    health_publisher(node->create_publisher<std_msgs::msg::Float64MultiArray>(
+        "/robstride/health", rclcpp::QoS(10)))
+  {
+    recovery_subscription = node->create_subscription<std_msgs::msg::UInt8MultiArray>(
+      "/robstride/recover", 10, [this](std_msgs::msg::UInt8MultiArray::ConstSharedPtr msg) {
+        for (const auto index : msg->data) {driver.request_recovery(index);}
+      });
+    gate_publisher = node->create_publisher<std_msgs::msg::UInt64MultiArray>(
+      "/robstride/command_gate_state", 10);
+    error_publisher = node->create_publisher<std_msgs::msg::Bool>(
+      "/robstride/hardware_error", rclcpp::QoS(1).transient_local());
+    gate_subscription = node->create_subscription<std_msgs::msg::UInt64>(
+      "/robstride/release_command_gate", 10,
+      [this](std_msgs::msg::UInt64::ConstSharedPtr msg) {driver.release_command_gate(msg->data);});
+    executor.add_node(node);
+    executor_thread = std::thread([this]() {executor.spin();});
+  }
+
+  ~Impl()
+  {
+    executor.cancel();
+    if (executor_thread.joinable()) {executor_thread.join();}
+  }
+
+  void publish_health()
+  {
+    std_msgs::msg::Float64MultiArray message;
+    for (const auto & joint : driver.joints()) {
+      message.data.push_back(joint.state.online);
+      message.data.push_back(joint.state.ready);
+      message.data.push_back(joint.state.fault);
+    }
+    health_publisher->publish(message);
+    std_msgs::msg::UInt64MultiArray gate;
+    const auto status = driver.command_gate_status();
+    gate.data.assign(status.begin(), status.end());
+    gate_publisher->publish(gate);
+  }
+
+  void publish_error(bool error)
+  {
+    std_msgs::msg::Bool msg;
+    msg.data = error;
+    error_publisher->publish(msg);
+  }
 
   robstride_driver::RobStrideDriver driver;
+  rclcpp::Node::SharedPtr node;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr health_publisher;
+  rclcpp::Subscription<std_msgs::msg::UInt8MultiArray>::SharedPtr recovery_subscription;
+  rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr gate_publisher;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr error_publisher;
+  rclcpp::Subscription<std_msgs::msg::UInt64>::SharedPtr gate_subscription;
+  rclcpp::executors::SingleThreadedExecutor executor;
+  std::thread executor_thread;
 };
 
 RobStrideSystem::RobStrideSystem()
@@ -95,9 +155,9 @@ std::vector<hardware_interface::StateInterface> RobStrideSystem::export_state_in
     if (joint.exports_temperature) {
       interfaces.emplace_back(joint.name, "temperature", &joint.state.temperature);
     }
-    if (joint.exports_fault) {
-      interfaces.emplace_back(joint.name, "fault", &joint.state.fault);
-    }
+    interfaces.emplace_back(joint.name, "fault", &joint.state.fault);
+    interfaces.emplace_back(joint.name, "online", &joint.state.online);
+    interfaces.emplace_back(joint.name, "ready", &joint.state.ready);
   }
   return interfaces;
 }
@@ -130,8 +190,9 @@ hardware_interface::CallbackReturn RobStrideSystem::on_cleanup(const rclcpp_life
 
 hardware_interface::CallbackReturn RobStrideSystem::on_activate(const rclcpp_lifecycle::State &)
 {
-  return impl_->driver.start() ?
-         hardware_interface::CallbackReturn::SUCCESS : hardware_interface::CallbackReturn::ERROR;
+  if (!impl_->driver.start()) {return hardware_interface::CallbackReturn::ERROR;}
+  impl_->publish_error(false);
+  return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn RobStrideSystem::on_deactivate(const rclcpp_lifecycle::State &)
@@ -149,6 +210,7 @@ hardware_interface::CallbackReturn RobStrideSystem::on_shutdown(const rclcpp_lif
 
 hardware_interface::CallbackReturn RobStrideSystem::on_error(const rclcpp_lifecycle::State &)
 {
+  impl_->publish_error(true);
   impl_->driver.stop();
   impl_->driver.close();
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -157,8 +219,9 @@ hardware_interface::CallbackReturn RobStrideSystem::on_error(const rclcpp_lifecy
 hardware_interface::return_type RobStrideSystem::read(
   const rclcpp::Time &, const rclcpp::Duration &)
 {
-  return impl_->driver.update_state() ?
-         hardware_interface::return_type::OK : hardware_interface::return_type::ERROR;
+  impl_->driver.update_state();
+  impl_->publish_health();
+  return hardware_interface::return_type::OK;
 }
 
 hardware_interface::return_type RobStrideSystem::write(
