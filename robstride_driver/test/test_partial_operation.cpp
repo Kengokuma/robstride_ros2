@@ -26,6 +26,7 @@ void check_partial_operation(bool managed)
   std::array<int, 4> stop_count{};
   std::array<int, 4> zero_gain_count{};
   std::array<int, 4> zero_count{};
+  std::array<int, 4> save_count{};
   std::array<double, 4> positions{{0, 0.2, 0.4, 0.6}};
   std::array<double, 4> last_target{};
   std::map<std::pair<int, int>, uint32_t> parameters;
@@ -55,6 +56,13 @@ void check_partial_operation(bool managed)
         if (type == rs::kTypeEnable) {modes[id] = rs::kMotorModeRun; ++enable_count[id];}
         else if (type == rs::kTypeStop) {modes[id] = rs::kMotorModeReset; ++stop_count[id];}
         else if (type == rs::kTypeSetZero) {positions[id] = 0.0; ++zero_count[id];}
+        else if (type == rs::kTypeSaveParameters) {
+          const std::array<uint8_t, 8> expected{{1, 2, 3, 4, 5, 6, 7, 8}};
+          EXPECT_EQ(frame->data, expected);
+          EXPECT_EQ(zero_count[id], 1);  // Save only after the selected motor was zeroed.
+          EXPECT_NEAR(positions[id], 0.0, 0.001);
+          ++save_count[id];
+        }
         else if (type == rs::kTypeMotionControl) {
           // Zero-gain keepalives are not position commands.
           if (frame->data[4] || frame->data[5]) {
@@ -102,7 +110,9 @@ void check_partial_operation(bool managed)
   ASSERT_TRUE(driver.apply_command_modes({{true, false, false}, {true, false, false},
     {true, false, false}}));
   auto cycle = [&]() {
-      executor.spin_some();
+      // Calibration sends one-shot transactions amid three-axis keepalives.
+      // Drain those frames rather than processing just one queued callback.
+      if (managed) {executor.spin_all(5ms);} else {executor.spin_some();}
       EXPECT_TRUE(driver.update_state());
       EXPECT_TRUE(driver.send_commands());
       std::this_thread::sleep_for(2ms);
@@ -190,6 +200,7 @@ void check_partial_operation(bool managed)
   std::string zero_error;
   EXPECT_FALSE(driver.set_zero(0, &zero_error));  // Active controller or unmanaged hardware.
   EXPECT_EQ(zero_count[1], 0);
+  EXPECT_EQ(save_count[1], 0);
   if (managed) {
     ASSERT_TRUE(driver.apply_command_modes({{}, {}, {}}));
     ASSERT_TRUE(wait([&]() {return driver.command_gate_status()[2] == 1;}));
@@ -205,6 +216,8 @@ void check_partial_operation(bool managed)
     EXPECT_FALSE(driver.apply_command_modes({{true, false, false}, {}, {}}));
     EXPECT_TRUE(wait([&]() {return zero_result.wait_for(0ms) == std::future_status::ready;}));
     EXPECT_TRUE(zero_result.get()) << zero_error;
+    ASSERT_TRUE(wait([&]() {return save_count[1] == 1;}));
+    EXPECT_EQ(save_count[3], 0);
     EXPECT_EQ(zero_count[3], 0);  // Only the selected CAN ID was zeroed.
     EXPECT_EQ(driver.command_gate_status()[1], 1u);
     ASSERT_TRUE(wait([&]() {return driver.command_gate_status()[2] == 1;}));

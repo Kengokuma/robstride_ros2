@@ -56,6 +56,10 @@ TEST(Protocol, LifecycleAndParameterFrames)
   EXPECT_EQ(rs::make_enable(3, 0xfd).id, 0x0300fd03u);
   EXPECT_EQ(rs::make_stop(3, 0xfd, true).data[0], 1u);
   EXPECT_EQ(rs::make_set_zero(3, 0xfd).data[0], 1u);
+  const auto save = rs::make_save_parameters(3, 0xfd);
+  EXPECT_EQ(save.id, 0x1600fd03u);
+  const std::array<uint8_t, 8> save_magic{{1, 2, 3, 4, 5, 6, 7, 8}};
+  EXPECT_EQ(save.data, save_magic);
   const auto mode = rs::make_write_u8(3, 0xfd, rs::kIndexRunMode, 0);
   EXPECT_EQ(mode.id, 0x1200fd03u);
   EXPECT_EQ(mode.data[0], 0x05);

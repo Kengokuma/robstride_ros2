@@ -406,8 +406,24 @@ bool RobStrideDriver::set_zero(size_t index, std::string * error)
              std::abs((joint.feedback.position - joint.position_offset) * joint.gear_ratio) < 0.02 &&
              std::abs(joint.feedback.velocity * joint.gear_ratio) < 0.2);
     });
-    const bool success = confirmed && active_ &&
+    const bool zero_confirmed = confirmed && active_ &&
       std::chrono::steady_clock::now() - joint.feedback_status.timestamp <= settings_.feedback_timeout;
+    bool post_save_feedback = false;
+    if (zero_confirmed) {
+      const auto save_at = std::chrono::steady_clock::now();
+      RCLCPP_INFO(logger_, "Issuing calibration save for motor %u", joint.can_id);
+      transport_->send_transaction(make_save_parameters(joint.can_id, settings_.host_id));
+      // Type 22 replies with ordinary feedback, not a flash verification result.
+      // Keep the arm paused and require fresh stationary feedback after the save request.
+      post_save_feedback = feedback_condition_.wait_until(
+        lock, save_at + std::chrono::milliseconds(500), [&]() {
+          return !active_ || (joint.feedback_status.timestamp > save_at +
+                 std::chrono::milliseconds(100) && joint.feedback.fault_flags == 0 &&
+                 std::isfinite(joint.feedback.position) &&
+                 std::abs((joint.feedback.position - joint.position_offset) * joint.gear_ratio) < 0.02 &&
+                 std::abs(joint.feedback.velocity * joint.gear_ratio) < 0.2);
+        });
+    }
     joint.state = joint.feedback;
     joint.command.position = joint.feedback.position;
     joint.command.velocity = 0.0;
@@ -415,7 +431,10 @@ bool RobStrideDriver::set_zero(size_t index, std::string * error)
     last_position_targets_[index].reset();
     latch_command_gate_locked();
     calibration_in_progress_ = false;
-    if (!success) {return fail("Zero position was not confirmed; keep calibration paused");}
+    if (!zero_confirmed) {return fail("Zero position was not confirmed; keep calibration paused");}
+    if (!post_save_feedback || !active_) {
+      return fail("Save requested but fresh zero feedback missing; keep calibration paused");
+    }
     return true;
   } catch (const std::exception & exception) {
     calibration_in_progress_ = false;

@@ -74,6 +74,14 @@ Frame make_set_zero(uint8_t motor_id, uint8_t host_id)
   return frame;
 }
 
+Frame make_save_parameters(uint8_t motor_id, uint8_t host_id)
+{
+  Frame frame;
+  frame.id = base_id(kTypeSaveParameters, host_id, motor_id);
+  frame.data = {1, 2, 3, 4, 5, 6, 7, 8};
+  return frame;
+}
+
 Frame make_read_parameter(uint8_t motor_id, uint8_t host_id, uint16_t index)
 {
   Frame frame;

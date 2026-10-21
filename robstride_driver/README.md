@@ -55,7 +55,12 @@ has no claimed command interfaces and its command gate is closed and synchronize
 It rejects absent, stale, faulty, or moving target feedback. The driver blocks new
 command claims during calibration, discards the old position history, and waits up
 to two seconds for fresh stationary feedback near the configured position offset.
-The gate stays closed on success or failure; this call does not resume motion.
+After confirming zero it sends one Type 22 save request (magic bytes 1 through 8)
+to the same motor, then waits up to 500 ms for fresh stationary zero feedback.
+Type 22 saves all storable parameters, not just the zero reference. Ordinary
+feedback is not proof of flash persistence; verify at a fixed pose after a power
+cycle. An unconfirmed zero is not saved. The gate stays closed on success or
+failure; this call does not resume motion or save during ordinary activation.
 
 Most users should integrate this library through the
 [`robstride_ros2_control`](https://github.com/s2015-turtle/robstride_ros2/tree/main/robstride_ros2_control)

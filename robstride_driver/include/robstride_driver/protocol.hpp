@@ -53,6 +53,7 @@ constexpr uint8_t kTypeStop = 4;
 constexpr uint8_t kTypeSetZero = 6;
 constexpr uint8_t kTypeReadParameter = 17;
 constexpr uint8_t kTypeWriteParameter = 18;
+constexpr uint8_t kTypeSaveParameters = 22;
 constexpr uint8_t kMotorModeReset = 0;
 constexpr uint8_t kMotorModeRun = 2;
 constexpr uint16_t kIndexRunMode = 0x7005;
@@ -66,6 +67,7 @@ Frame make_motion_command(
 Frame make_enable(uint8_t motor_id, uint8_t host_id);
 Frame make_stop(uint8_t motor_id, uint8_t host_id, bool clear_fault = false);
 Frame make_set_zero(uint8_t motor_id, uint8_t host_id);
+Frame make_save_parameters(uint8_t motor_id, uint8_t host_id);
 Frame make_read_parameter(uint8_t motor_id, uint8_t host_id, uint16_t index);
 Frame make_write_u8(uint8_t motor_id, uint8_t host_id, uint16_t index, uint8_t value);
 Frame make_write_u32(uint8_t motor_id, uint8_t host_id, uint16_t index, uint32_t value);

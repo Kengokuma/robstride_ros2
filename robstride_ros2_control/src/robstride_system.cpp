@@ -92,7 +92,7 @@ struct RobStrideSystem::Impl
         std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
           response->success = driver.set_zero(index, &response->message);
           if (response->success) {
-            response->message = "Motor zero confirmed; command gate remains closed";
+            response->message = "Zero confirmed and parameter save requested; verify after power cycle. Command gate remains closed";
           }
         }));
     }
