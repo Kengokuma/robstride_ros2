@@ -68,3 +68,48 @@ Hardware Component. See the
 [repository README](https://github.com/s2015-turtle/robstride_ros2#readme) for
 supported actuators, safety behavior, configuration parameters, and
 installation instructions.
+
+## Opt-in CSP position control
+
+A joint with `control_mode=csp` uses `run_mode=5` and float `loc_ref` (0x7016),
+not the Type 1 +/-4pi position field. Only the position command interface is
+supported in this mode. `allow_partial_start=true` and
+`managed_command_gate=true` are required, including at the direct driver API.
+Other joints retain their existing motion-control behavior.
+
+Required joint parameters are `csp_position_min/max` (motor-output rad),
+`csp_speed_limit` (motor-output rad/s), `csp_current_limit` (A), and
+`csp_torque_limit` (motor-output Nm). Bounds are explicit operational limits,
+not claims about firmware travel. Match the current limit to the actual motor;
+the parser accepts up to 43 A, the RS03 specification maximum. Bounds and all
+limits must be finite and positive where applicable. Float endpoints are encoded
+towards the interior. `command_position_min/max` remain in joint coordinates;
+by default they are derived from the CSP bounds, direction, gearing and offset.
+CSP does not use the motion-mode `kp`/`kd`: it retains the motor's existing
+`loc_kp`, `spd_kp`, and `spd_ki`. It does not save or zero on activation.
+
+The driver polls float `mechPos` (0x7019) at up to 50 Hz from `update_state()`.
+CSP joint position comes exclusively from successful finite `mechPos` replies;
+Type 2 still provides velocity, effort, mode and fault information. There is no
+fallback to the wrapped Type 2 position. `csp_feedback_timeout_ms` defaults to
+100 ms (40..1000 allowed). Missing, invalid or stale replies close the managed
+gate and suspend new commands, even if Type 2 feedback continues. Suspension
+alone does not send Stop: the motor retains its last target subject to its own
+watchdog and protection. Explicit recovery uses Stop and zero current and must
+be performed with the arm supported, as with the existing recovery path.
+
+Startup/recovery confirms zero current limit, CSP mode, speed and torque limits
+by parameter readback, obtains fresh `mechPos`, seeds the position target while
+current is zero, and then enables. The gate remains closed with zero-current
+keepalives until the controller stop/sync/start handshake completes. Active
+commands send `loc_ref` followed by the configured current limit as one
+coalesced/cancellable transport group. Invalid targets retain the last valid
+position/current limit rather than releasing holding torque or stopping peers.
+Shutdown sends zero current and Stop, never a Type 1 command for CSP joints.
+
+An apparent `mechPos` fold larger than half the Type 2 position span while fresh
+latches a CSP position fault. The old joint position is retained and recovery
+cannot clear this fault; investigate the firmware/data and reactivate hardware
+before proceeding. Intentional zero calibration is exempt from this check.
+Power loss discards the old target through the existing gate; this does not
+restore a power-off turn count or persist a new origin.

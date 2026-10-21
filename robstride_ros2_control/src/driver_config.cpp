@@ -170,6 +170,29 @@ JointData parse_joint(const hardware_interface::ComponentInfo & info)
         number_or_parameter(info.parameters, "effort_wire_max", "effort_max"),
         required_number(info.parameters, "kp_max"), required_number(info.parameters, "kd_max")};
     }
+    const auto mode = info.parameters.find("control_mode");
+    if (mode != info.parameters.end()) {
+      if (mode->second != "motion" && mode->second != "csp") {
+        throw std::runtime_error("control_mode must be motion or csp");
+      }
+      joint.csp = mode->second == "csp";
+    }
+    if (joint.csp) {
+      joint.csp_speed_limit = required_number(info.parameters, "csp_speed_limit");
+      joint.csp_current_limit = required_number(info.parameters, "csp_current_limit");
+      joint.csp_torque_limit = required_number(info.parameters, "csp_torque_limit");
+      joint.csp_position_min = required_number(info.parameters, "csp_position_min");
+      joint.csp_position_max = required_number(info.parameters, "csp_position_max");
+      joint.csp_feedback_timeout = std::chrono::milliseconds(100);
+      if (info.parameters.count("csp_feedback_timeout_ms")) {
+        joint.csp_feedback_timeout = std::chrono::milliseconds(parse_integer(
+          required_value(info.parameters, "csp_feedback_timeout_ms"),
+          "csp_feedback_timeout_ms", 40, 1000));
+      }
+      if (!joint.valid_csp_configuration()) {
+        throw std::runtime_error("invalid CSP limits (speed/current/torque/position)");
+      }
+    }
     joint.kp = required_number(info.parameters, "kp");
     joint.kd = required_number(info.parameters, "kd");
     joint.can_timeout_ticks = static_cast<uint32_t>(parse_integer(
@@ -276,7 +299,7 @@ JointData parse_joint(const hardware_interface::ComponentInfo & info)
       hardware_interface::HW_IF_EFFORT};
     const std::set<std::string> allowed_states{
       hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY,
-      hardware_interface::HW_IF_EFFORT, "temperature", "fault", "online", "ready"};
+      hardware_interface::HW_IF_EFFORT, "temperature", "fault", "online", "ready", "motor_position", "motor_position_wrapped"};
     std::set<std::string> actual_states;
     for (const auto & interface : info.state_interfaces) {actual_states.insert(interface.name);}
     if (!std::includes(
@@ -369,6 +392,9 @@ try
     auto joint = parse_joint(joint_info);
     if (!configured_can_ids.insert(joint.can_id).second) {
       throw std::runtime_error("duplicate can_id " + std::to_string(joint.can_id));
+    }
+    if (joint.csp && (!settings.allow_partial_start || !settings.managed_command_gate)) {
+      throw std::runtime_error("CSP requires allow_partial_start and managed_command_gate");
     }
     configuration.joints.push_back(std::move(joint));
   }

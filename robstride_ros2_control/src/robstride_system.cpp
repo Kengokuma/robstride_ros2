@@ -175,6 +175,10 @@ std::vector<hardware_interface::StateInterface> RobStrideSystem::export_state_in
     if (joint.exports_temperature) {
       interfaces.emplace_back(joint.name, "temperature", &joint.state.temperature);
     }
+    if (joint.csp) {
+      interfaces.emplace_back(joint.name, "motor_position", &joint.state.motor_position);
+      interfaces.emplace_back(joint.name, "motor_position_wrapped", &joint.state.motor_position_wrapped);
+    }
     interfaces.emplace_back(joint.name, "fault", &joint.state.fault);
     interfaces.emplace_back(joint.name, "online", &joint.state.online);
     interfaces.emplace_back(joint.name, "ready", &joint.state.ready);

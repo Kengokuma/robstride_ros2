@@ -211,3 +211,28 @@ TEST(JointData, RejectsAmplifiedCancellationEvenWhenJointEndpointsRemainDistinct
   EXPECT_FALSE(joint.checked_joint_to_motor_position(low));
   EXPECT_FALSE(joint.checked_joint_to_motor_position(high));
 }
+
+TEST(JointData, CspTransformsFloatPositionWithoutUsingTheType1Range)
+{
+  rs::JointData joint;
+  joint.limits = {-12, 12, -20, 20, -60, 60, -60, 60, 5000, 100};
+  joint.csp = true;
+  joint.csp_position_min = -20;
+  joint.csp_position_max = 20;
+  joint.csp_speed_limit = 0.5;
+  joint.csp_current_limit = 1;
+  joint.csp_torque_limit = 2;
+  joint.direction = -1;
+  joint.gear_ratio = 9;
+  joint.position_offset = 0.25;
+  ASSERT_TRUE(joint.valid_csp_configuration());
+  auto motor = joint.checked_joint_to_motor_position(0.25 - 15.0 / 9.0);
+  ASSERT_TRUE(motor);
+  EXPECT_NEAR(*motor, 15.0, 1e-6);
+  EXPECT_FALSE(joint.checked_joint_to_motor_position(0.25 - 21.0 / 9.0));
+  joint.csp_position_max = 15.1;
+  const auto endpoint = joint.checked_joint_to_motor_position(0.25 - 15.1 / 9.0);
+  if (endpoint) {EXPECT_LE(*endpoint, 15.1);}
+  joint.csp_current_limit = 0;
+  EXPECT_FALSE(joint.valid_csp_configuration());
+}

@@ -311,3 +311,28 @@ TEST(DriverConfig, RejectsNonPositiveTransmitFailureTimeout)
     EXPECT_THROW(rs::parse_driver_configuration(hardware), std::runtime_error) << value;
   }
 }
+
+TEST(DriverConfig, CspHasExplicitFloatLimitsAndRequiresManagedGate)
+{
+  auto hardware = valid_hardware_info();
+  auto & params = hardware.joints[0].parameters;
+  params.insert({{"control_mode", "csp"}, {"csp_position_min", "-20"},
+    {"csp_position_max", "20"}, {"csp_speed_limit", "0.5"},
+    {"csp_current_limit", "1"}, {"csp_torque_limit", "2"}});
+  EXPECT_THROW(rs::parse_driver_configuration(hardware), std::runtime_error);
+  hardware.hardware_parameters["allow_partial_start"] = "true";
+  hardware.hardware_parameters["managed_command_gate"] = "true";
+  auto config = rs::parse_driver_configuration(hardware);
+  ASSERT_TRUE(config.joints[0].csp);
+  EXPECT_DOUBLE_EQ(*config.joints[0].checked_joint_to_motor_position(15), 15);
+  EXPECT_DOUBLE_EQ(config.joints[0].command_limits.position_max, 20);
+  for (const auto * key : {"csp_position_min", "csp_position_max", "csp_speed_limit",
+      "csp_current_limit", "csp_torque_limit", "csp_feedback_timeout_ms"})
+  {
+    auto invalid = hardware;
+    invalid.joints[0].parameters[key] = "nan";
+    EXPECT_THROW(rs::parse_driver_configuration(invalid), std::runtime_error) << key;
+  }
+  params["control_mode"] = "pp";
+  EXPECT_THROW(rs::parse_driver_configuration(hardware), std::runtime_error);
+}

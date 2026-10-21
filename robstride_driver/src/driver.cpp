@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -15,6 +16,28 @@ namespace robstride_driver
 {
 namespace
 {
+uint32_t float_bits(double value)
+{
+  const float narrowed = static_cast<float>(value);
+  uint32_t bits;
+  std::memcpy(&bits, &narrowed, sizeof(bits));
+  return bits;
+}
+
+std::vector<std::pair<uint16_t, uint32_t>> csp_parameters(const JointData & joint)
+{
+  // Zero current before selecting CSP: an old loc_ref must never move the arm.
+  return {{kIndexCurrentLimit, float_bits(0.0)}, {kIndexRunMode, 5},
+    {kIndexSpeedLimit, float_bits(joint.csp_speed_limit)},
+    {kIndexTorqueLimit, float_bits(joint.csp_torque_limit)}};
+}
+
+Frame neutral_command(const JointData & joint, uint8_t host)
+{
+  if (joint.csp) {return make_write_float(joint.can_id, host, kIndexCurrentLimit, 0.0f);}
+  return make_motion_command(joint.can_id, joint.limits, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
 int64_t steady_time_ns(std::chrono::steady_clock::time_point time) noexcept
 {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
@@ -56,6 +79,13 @@ bool RobStrideDriver::initialize(DriverConfiguration configuration)
       RCLCPP_ERROR(
         logger_, "Joint '%s': %s must be finite, ordered, and include zero",
         joint.name.c_str(), range);
+      return false;
+    }
+    if (!joint.valid_csp_configuration() ||
+      (joint.csp && (!configuration.settings.allow_partial_start ||
+      !configuration.settings.managed_command_gate || configuration.settings.set_zero_on_start)))
+    {
+      RCLCPP_ERROR(logger_, "CSP requires valid explicit limits and a managed partial-start gate");
       return false;
     }
     const auto & command = joint.command_limits;
@@ -143,6 +173,9 @@ bool RobStrideDriver::start()
       for (auto & joint : joints_) {
         joint.initialized = false;
         joint.initialization_stage = 0;
+        joint.csp_configuration_step = 0;
+        joint.csp_position_fault = false;
+        joint.mech_position_at = {};
         joint.recovery_requested = false;
         joint.position_sync_pending = true;
         joint.command = CommandValues{};
@@ -257,7 +290,7 @@ bool RobStrideDriver::update_state()
       joint.state.online = joint.feedback_status.received &&
         now - joint.feedback_status.timestamp <= settings_.feedback_timeout ? 1.0 : 0.0;
       joint.state.ready = joint.state.online && joint.feedback_status.mode == kMotorModeRun ? 1.0 : 0.0;
-      joint.state.fault = joint.feedback.fault_flags != 0 ? 1.0 : 0.0;
+      joint.state.fault = joint.feedback.fault_flags != 0 || joint.csp_position_fault ? 1.0 : 0.0;
       joint.state.fault_flags = static_cast<double>(joint.feedback.fault_flags);
 
       if (joint.feedback_status.received && joint.recovery_requested) {
@@ -322,7 +355,7 @@ bool RobStrideDriver::update_state()
         joint.state = joint.feedback;
         joint.state.online = 1.0;
         joint.state.ready = joint.feedback_status.mode == kMotorModeRun ? 1.0 : 0.0;
-        joint.state.fault = joint.feedback.fault_flags != 0 ? 1.0 : 0.0;
+        joint.state.fault = joint.feedback.fault_flags != 0 || joint.csp_position_fault ? 1.0 : 0.0;
         joint.state.fault_flags = joint.feedback.fault_flags;
         joint.command.position = joint.state.position;
       }
@@ -395,12 +428,23 @@ bool RobStrideDriver::set_zero(size_t index, std::string * error)
   last_position_targets_[index].reset();
   joint.position_sync_pending = true;
   try {
+    if (joint.csp) {
+      // Gate synchronization alone does not acknowledge the zero-current write.
+      lock.unlock();
+      const bool neutral_confirmed = write_and_confirm_parameter(joint, kIndexCurrentLimit, 0);
+      lock.lock();
+      if (!neutral_confirmed || !active_) {
+        calibration_in_progress_ = false;
+        return fail("CSP zero current limit was not confirmed; keep calibration paused");
+      }
+    }
     transport_->send_transaction(make_set_zero(joint.can_id, settings_.host_id));
     // Wait beyond the immediate reply to exclude feedback queued before zeroing.
     const auto confirm_after = now + std::chrono::milliseconds(50);
     const auto deadline = now + std::chrono::seconds(2);
     const bool confirmed = feedback_condition_.wait_until(lock, deadline, [&]() {
-      return !active_ || (joint.feedback_status.timestamp > confirm_after &&
+      return !active_ || ((!joint.csp || joint.mech_position_at > confirm_after) &&
+             joint.feedback_status.timestamp > confirm_after &&
              joint.feedback.fault_flags == 0 &&
              std::isfinite(joint.feedback.position) &&
              std::abs((joint.feedback.position - joint.position_offset) * joint.gear_ratio) < 0.02 &&
@@ -417,7 +461,8 @@ bool RobStrideDriver::set_zero(size_t index, std::string * error)
       // Keep the arm paused and require fresh stationary feedback after the save request.
       post_save_feedback = feedback_condition_.wait_until(
         lock, save_at + std::chrono::milliseconds(500), [&]() {
-          return !active_ || (joint.feedback_status.timestamp > save_at +
+          return !active_ || ((!joint.csp || joint.mech_position_at > save_at +
+                 std::chrono::milliseconds(100)) && joint.feedback_status.timestamp > save_at +
                  std::chrono::milliseconds(100) && joint.feedback.fault_flags == 0 &&
                  std::isfinite(joint.feedback.position) &&
                  std::abs((joint.feedback.position - joint.position_offset) * joint.gear_ratio) < 0.02 &&
@@ -469,8 +514,16 @@ bool RobStrideDriver::update_partial_state()
       auto & joint = joints_[index];
       const bool fresh = joint.feedback_status.received &&
         now - joint.feedback_status.timestamp <= settings_.feedback_timeout;
-      const bool running = fresh && joint.feedback_status.mode == kMotorModeRun &&
-        joint.feedback.fault_flags == 0;
+      if (joint.csp && now - joint.mech_requested_at >= std::chrono::milliseconds(20)) {
+        transactions.push_back(make_read_parameter(joint.can_id, settings_.host_id,
+          kIndexMechPosition));
+        joint.mech_requested_at = now;
+      }
+      const bool position_fresh = !joint.csp || (joint.mech_position_at.time_since_epoch().count() &&
+        now - joint.mech_position_at <= joint.csp_feedback_timeout);
+      const bool running = fresh && position_fresh &&
+        joint.feedback_status.mode == kMotorModeRun && joint.feedback.fault_flags == 0 &&
+        !joint.csp_position_fault;
       if (!running && joint.initialized) {
         last_position_targets_[index].reset();
         if (settings_.managed_command_gate) {latch_command_gate_locked();}
@@ -481,7 +534,7 @@ bool RobStrideDriver::update_partial_state()
       if (joint.feedback_status.received) {joint.state = joint.feedback;}
       joint.state.online = fresh ? 1.0 : 0.0;
       joint.state.ready = running && joint.initialized ? 1.0 : 0.0;
-      joint.state.fault = joint.feedback.fault_flags != 0 ? 1.0 : 0.0;
+      joint.state.fault = joint.feedback.fault_flags != 0 || joint.csp_position_fault ? 1.0 : 0.0;
       joint.state.fault_flags = joint.feedback.fault_flags;
       if (joint.state.ready) {continue;}
       joint.command.position = joint.state.position;
@@ -490,7 +543,7 @@ bool RobStrideDriver::update_partial_state()
       // A per-motor recovery marker drops queued motion without stopping other motors.
       recovery_updates_.push_back(CanTransport::RecoveryUpdate{
         index, std::nullopt, true});
-      if (!joint.recovery_requested) {continue;}
+      if (!joint.recovery_requested || joint.csp_position_fault) {continue;}
       if (now - joint.initialization_attempt_at < settings_.recovery_retry_interval) {continue;}
       joint.initialization_attempt_at = now;
       auto & stage = joint.initialization_stage;
@@ -498,6 +551,8 @@ bool RobStrideDriver::update_partial_state()
       const bool confirmed = parameter.received && parameter.status == 0 &&
         parameter.timestamp >= joint.initialization_requested_at;
       if (stage == 0) {
+        joint.csp_configuration_step = 0;
+        if (joint.csp) {joint.mech_position_at = {};}
         transactions.push_back(make_stop(joint.can_id, settings_.host_id,
           settings_.clear_faults_on_start));
         joint.initialization_requested_at = now;
@@ -513,6 +568,39 @@ bool RobStrideDriver::update_partial_state()
           parameter.value == joint.can_timeout_ticks) {stage = 2;}
         else if (now - joint.initialization_requested_at > settings_.startup_confirmation_timeout) {
           stage = 0;
+        }
+      } else if (stage == 2 && joint.csp) {
+        const auto parameters = csp_parameters(joint);
+        const auto [key, value] = parameters[joint.csp_configuration_step];
+        transactions.push_back(key == kIndexRunMode ?
+          make_write_u8(joint.can_id, settings_.host_id, key, 5) :
+          make_write_u32(joint.can_id, settings_.host_id, key, value));
+        transactions.push_back(make_read_parameter(joint.can_id, settings_.host_id, key));
+        joint.initialization_requested_at = now;
+        stage = 5;
+      } else if (stage == 5 && joint.csp) {
+        const auto parameters = csp_parameters(joint);
+        const auto [key, value] = parameters[joint.csp_configuration_step];
+        if (confirmed && parameter.index == key && parameter.value == value) {
+          ++joint.csp_configuration_step;
+          if (joint.csp_configuration_step == parameters.size()) {
+            joint.initialization_requested_at = now;
+            stage = 6;
+          } else {stage = 2;}
+        } else if (now - joint.initialization_requested_at > settings_.startup_confirmation_timeout) {
+          stage = 0;
+        }
+      } else if (stage == 6 && joint.csp) {
+        // Require a new continuous position after configuration, seed while disabled.
+        if (position_fresh && joint.mech_position_at >= joint.initialization_requested_at &&
+          joint.checked_joint_to_motor_position(joint.feedback.position) &&
+          joint.command_limits.contains_position(joint.feedback.position))
+        {
+          transactions.push_back(make_write_float(joint.can_id, settings_.host_id,
+            kIndexPositionReference, static_cast<float>(joint.feedback.motor_position)));
+          transactions.push_back(make_enable(joint.can_id, settings_.host_id));
+          joint.initialization_requested_at = now;
+          stage = 4;
         }
       } else if (stage == 2) {
         transactions.push_back(make_write_u8(joint.can_id, settings_.host_id, kIndexRunMode, 0));
@@ -562,7 +650,7 @@ bool RobStrideDriver::update_partial_state()
         const auto & joint = joints_[index];
         if (command_gate_closed_ && joint.state.ready) {
           recovery_updates_.push_back(CanTransport::RecoveryUpdate{index,
-            make_motion_command(joint.can_id, joint.limits, 0.0, 0.0, 0.0, 0.0, 0.0)});
+            neutral_command(joint, settings_.host_id)});
         } else {
           recovery_updates_.push_back(CanTransport::RecoveryUpdate{index,
             std::nullopt, !joint.state.ready});
@@ -614,7 +702,8 @@ bool RobStrideDriver::send_commands()
       auto & joint = joints_[joint_index];
       bool holding_position = false;
       if (settings_.allow_partial_start) {
-        if (!joint.state.ready || joint.state.fault || !joint.initialized) {continue;}
+        if (!joint.state.ready || joint.state.fault || !joint.initialized ||
+          joint.csp_position_fault) {continue;}
         if (joint.claimed.position && joint.position_sync_pending) {
           if (!std::isfinite(joint.command.position) ||
             std::abs(joint.command.position - joint.state.position) > 0.01) {continue;}
@@ -691,6 +780,20 @@ bool RobStrideDriver::send_commands()
           std::max(joint.limits.effort_min, joint.limits.effort_wire_min),
           std::min(joint.limits.effort_max, joint.limits.effort_wire_max));
         break;
+      }
+      if (joint.csp) {
+        if (joint.claimed.position) {
+          command_snapshot_.push_back(CanTransport::MotorFrame{joint_index,
+            make_write_float(joint.can_id, settings_.host_id, kIndexPositionReference,
+              static_cast<float>(motor_position)),
+            make_write_float(joint.can_id, settings_.host_id, kIndexCurrentLimit,
+              static_cast<float>(joint.csp_current_limit))});
+          last_position_targets_[joint_index] = joint.command.position;
+        } else {
+          command_snapshot_.push_back(CanTransport::MotorFrame{joint_index,
+            neutral_command(joint, settings_.host_id)});
+        }
+        continue;
       }
       const double kp = joint.claimed.position ? joint.kp : 0.0;
       const double kd = (joint.claimed.position || joint.claimed.velocity) ? joint.kd : 0.0;
@@ -783,6 +886,10 @@ bool RobStrideDriver::validate_command_modes_locked(
   const auto now = std::chrono::steady_clock::now();
   for (size_t index = 0; index < joints_.size(); ++index) {
     const auto & joint = joints_[index];
+    if (joint.csp && (modes[index].velocity || modes[index].effort)) {
+      if (error) {*error = "CSP supports only the position command interface";}
+      return false;
+    }
     if (joint.claimed.position || !modes[index].position) {continue;}
     const auto & status = joint.feedback_status;
     const double position = joint.feedback.position;
@@ -918,6 +1025,32 @@ void RobStrideDriver::receive_frame(can_msgs::msg::Frame::ConstSharedPtr msg)
     ++parameter_frames_received_;
     std::lock_guard<std::mutex> lock(state_mutex_);
     auto & joint = joints_[joint_entry->second];
+    if (joint.csp && parameter->index == kIndexMechPosition) {
+      float position;
+      std::memcpy(&position, &parameter->value, sizeof(position));
+      if (parameter->status == 0 && std::isfinite(position) && !joint.csp_position_fault) {
+        // An apparent +/-4pi fold in mechPos must not become a joint-state jump.
+        // Within the short freshness window this displacement is physically impossible.
+        if (joint.initialized && !calibration_in_progress_ &&
+          joint.mech_position_at.time_since_epoch().count() &&
+          std::chrono::steady_clock::now() - joint.mech_position_at <= joint.csp_feedback_timeout &&
+          std::abs(position - joint.feedback.motor_position) >
+          (joint.limits.position_max - joint.limits.position_min) / 2.0)
+        {
+          joint.csp_position_fault = true;
+          RCLCPP_ERROR(logger_, "Joint '%s': mechPos discontinuity; CSP latched off until hardware reactivation",
+            joint.name.c_str());
+          feedback_condition_.notify_all();
+          return;
+        }
+        joint.feedback.motor_position = position;
+        joint.feedback.position = joint.direction * (position / joint.gear_ratio) +
+          joint.position_offset;
+        joint.mech_position_at = std::chrono::steady_clock::now();
+      }
+      feedback_condition_.notify_all();
+      return;
+    }
     joint.parameter_status.received = true;
     joint.parameter_status.status = parameter->status;
     joint.parameter_status.index = parameter->index;
@@ -936,8 +1069,12 @@ void RobStrideDriver::receive_frame(can_msgs::msg::Frame::ConstSharedPtr msg)
   record_feedback(joint_entry->second, received_at, *decoded);
   std::lock_guard<std::mutex> lock(state_mutex_);
   auto & joint = joints_[joint_entry->second];
-  joint.feedback.position =
-    joint.direction * (decoded->position / joint.gear_ratio) + joint.position_offset;
+  joint.feedback.motor_position_wrapped = decoded->position;
+  if (!joint.csp) {
+    joint.feedback.motor_position = decoded->position;
+    joint.feedback.position =
+      joint.direction * (decoded->position / joint.gear_ratio) + joint.position_offset;
+  }
   joint.feedback.velocity = joint.direction * (decoded->velocity / joint.gear_ratio);
   joint.feedback.effort = joint.motor_to_joint_effort(decoded->effort);
   joint.feedback.temperature = decoded->temperature;
@@ -1074,8 +1211,7 @@ void RobStrideDriver::disable_all()
   bool stop_frames_acknowledged = false;
   for (int attempt = 0; attempt < settings_.stop_repetitions; ++attempt) {
     for (const auto & joint : joints_) {
-      transport_->send_transaction(
-        make_motion_command(joint.can_id, joint.limits, 0.0, 0.0, 0.0, 0.0, 0.0));
+      transport_->send_transaction(neutral_command(joint, settings_.host_id));
       transport_->send_transaction(make_stop(joint.can_id, settings_.host_id));
     }
     stop_frames_acknowledged =

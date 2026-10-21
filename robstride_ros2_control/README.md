@@ -113,3 +113,22 @@ only after hardware acknowledges gate release, and only accepts start stamps
 newer than that acknowledgement. All trajectory target positions are finite;
 unavailable motor entries are gated by the driver. Do not publish directly to
 the controller topic or action if recovery command filtering is required.
+
+## CSP
+
+Add `robstride_csp_params` inside the desired joint, alongside its model parameters
+and normal interfaces:
+
+```xml
+<xacro:robstride_csp_params position_min="-12.46" position_max="15.0"
+  speed_limit="0.5" current_limit="1.0" torque_limit="2.0"/>
+```
+
+Use the managed partial-start gate. These are example test limits, not calibrated
+robot limits. The existing motor CSP gains are retained; motion-mode Kp/Kd do not
+apply. Additional state interfaces `motor_position` and `motor_position_wrapped`
+report raw motor-output radians (`mechPos` and Type 2 respectively); joint
+`position` applies direction, gear ratio and offset. They are available through
+joint_state_broadcaster's `/dynamic_joint_states`. Compare them during a supported,
+slow boundary test before increasing the limits. See the driver README for
+freshness, initialization, holding, and recovery behavior.

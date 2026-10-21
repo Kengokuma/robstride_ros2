@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <limits>
 #include <future>
@@ -12,7 +13,7 @@
 namespace rs = robstride_driver;
 using namespace std::chrono_literals;
 
-void check_partial_operation(bool managed)
+void check_partial_operation(bool managed, bool csp = false)
 {
   auto context = std::make_shared<rclcpp::Context>();
   context->init(0, nullptr);
@@ -44,13 +45,33 @@ void check_partial_operation(bool managed)
         uint32_t value = 0;
         for (int i = 0; i < 4; ++i) {value |= uint32_t(frame->data[4 + i]) << (i * 8);}
         parameters[{id, index}] = value;
+        if (csp && index == rs::kIndexPositionReference) {
+          float target;
+          std::memcpy(&target, &value, sizeof(target));
+          last_target[id] = target;
+          if (parameters[{id, rs::kIndexCurrentLimit}] != 0) {++motion_count[id];}
+        }
+        if (csp && index == rs::kIndexCurrentLimit && value == 0) {++zero_gain_count[id];}
+        if (!csp) {return;}
+        // CSP writes produce ordinary feedback too; keep mode/fault freshness independent
+        // of the separately polled continuous position.
+        reply.id = (rs::kTypeFeedback << 24) | (modes[id] << 22) | (id << 8) | 0xfd;
+        const auto raw = rs::encode_u16(positions[id], -12, 12);
+        reply.data[0] = raw >> 8;
+        reply.data[1] = raw & 0xff;
+        reply.data[2] = reply.data[4] = 0x80;
+        publisher->publish(reply);
         return;
       }
       if (type == rs::kTypeReadParameter) {
         reply.id = (rs::kTypeReadParameter << 24) | (id << 8) | 0xfd;
         reply.data[0] = index & 0xff;
         reply.data[1] = index >> 8;
-        const auto value = parameters[{id, index}];
+        auto value = parameters[{id, index}];
+        if (csp && index == rs::kIndexMechPosition) {
+          const float continuous = static_cast<float>(positions[id]);
+          std::memcpy(&value, &continuous, sizeof(value));
+        }
         for (int i = 0; i < 4; ++i) {reply.data[4 + i] = (value >> (i * 8)) & 0xff;}
       } else {
         if (type == rs::kTypeEnable) {modes[id] = rs::kMotorModeRun; ++enable_count[id];}
@@ -64,6 +85,7 @@ void check_partial_operation(bool managed)
           ++save_count[id];
         }
         else if (type == rs::kTypeMotionControl) {
+          EXPECT_FALSE(csp);  // No Type 1 commands on any CSP motor, including keepalives.
           // Zero-gain keepalives are not position commands.
           if (frame->data[4] || frame->data[5]) {
             ++motion_count[id];
@@ -101,6 +123,14 @@ void check_partial_operation(bool managed)
     joint.limits = limits;
     joint.command_limits = {-2, 2, -10, 10, -3, 3};
     joint.kp = 20;
+    joint.csp = csp;
+    if (csp) {
+      joint.csp_position_min = -12;
+      joint.csp_position_max = 12;
+      joint.csp_speed_limit = 0.5;
+      joint.csp_current_limit = 1;
+      joint.csp_torque_limit = 2;
+    }
     config.joints.push_back(joint);
   }
   rs::RobStrideDriver driver(rclcpp::get_logger("partial_test"));
@@ -286,4 +316,9 @@ TEST(PartialOperation, MissingPeerAndPowerCycleDoNotStopHealthyAxis)
 TEST(PartialOperation, ManagedGateWaitsForControllerStopSyncStartAndFreshCommand)
 {
   check_partial_operation(true);
+}
+
+TEST(PartialOperation, AllCspMotorsKeepSeparateFeedbackCalibrationAndRecovery)
+{
+  check_partial_operation(true, true);
 }

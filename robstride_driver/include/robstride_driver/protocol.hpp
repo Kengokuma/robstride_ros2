@@ -58,6 +58,11 @@ constexpr uint8_t kMotorModeReset = 0;
 constexpr uint8_t kMotorModeRun = 2;
 constexpr uint16_t kIndexRunMode = 0x7005;
 constexpr uint16_t kIndexCanTimeout = 0x7028;
+constexpr uint16_t kIndexPositionReference = 0x7016;
+constexpr uint16_t kIndexSpeedLimit = 0x7017;
+constexpr uint16_t kIndexCurrentLimit = 0x7018;
+constexpr uint16_t kIndexMechPosition = 0x7019;
+constexpr uint16_t kIndexTorqueLimit = 0x700b;
 
 uint16_t encode_u16(double value, double minimum, double maximum);
 double decode_u16(uint16_t value, double minimum, double maximum);

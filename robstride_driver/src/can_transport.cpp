@@ -207,7 +207,7 @@ void CanTransport::queue_motion_frames(const std::vector<MotorFrame> & frames)
       if (update.motor_index >= options_.motor_count) {continue;}
       if (pending_motion_frames_[update.motor_index]) {++motion_frames_coalesced_;}
       pending_motion_frames_[update.motor_index] =
-        ActiveFrame{update.frame, update.motor_index, generation};
+        ActiveFrame{update.frame, update.motor_index, generation, update.following_frame};
       enqueued = true;
     }
     if (enqueued) {
@@ -328,11 +328,11 @@ void CanTransport::publish_active(const ActiveFrame & frame, bool is_recovery)
   const bool recovering = recovery_active_[frame.motor_index];
   if ((is_recovery && !recovering) || (!is_recovery && recovering)) {return;}
   if (!publish_unlocked(frame.frame)) {return;}
-  if (is_recovery) {
-    ++recovery_frames_transmitted_;
-  } else {
-    ++motion_frames_transmitted_;
-  }
+  auto & counter = is_recovery ? recovery_frames_transmitted_ : motion_frames_transmitted_;
+  ++counter;
+  // A CSP target and its current limit are coalesced/cancelled as one command.
+  // Hold publisher_mutex_ across both frames so stop cannot split the pair.
+  if (frame.following_frame && publish_unlocked(*frame.following_frame)) {++counter;}
 }
 
 bool CanTransport::publish_unlocked(const Frame & source)

@@ -484,3 +484,28 @@ TEST(CanTransport, RepeatedlyStopsAsTheWorkerBecomesIdle)
     stop.get();
   }
 }
+
+TEST(CanTransport, CoalescesCspTargetAndCurrentAsAnOrderedPair)
+{
+  auto capture = std::make_shared<CaptureState>();
+  capture->blocking_id = 0x40;
+  rs::CanTransport transport(valid_options(), kReceiveCallback, sink_for(capture));
+  CaptureReleaseGuard release_guard(capture);
+  transport.start();
+  transport.enable_active_commands();
+  transport.send_transaction(rs::Frame{0x40, {}});
+  ASSERT_TRUE(capture->wait_until_blocked());
+  transport.queue_motion_frames({{0, rs::Frame{0x10, {}}, rs::Frame{0x20, {}}}});
+  transport.queue_motion_frames({{0, rs::Frame{0x11, {}}, rs::Frame{0x21, {}}}});
+  capture->release();
+  ASSERT_TRUE(capture->wait_for_size(3));
+  auto frames = capture->snapshot();
+  ASSERT_EQ(frames.size(), 3u);
+  EXPECT_EQ(frames[1].id, 0x11u);
+  EXPECT_EQ(frames[2].id, 0x21u);
+  ASSERT_TRUE(wait_for_metric([&]() {return transport.metrics().motion_frames_transmitted == 2;}));
+  transport.disable_active_commands();
+  transport.queue_motion_frames({{0, rs::Frame{0x12, {}}, rs::Frame{0x22, {}}}});
+  transport.stop();
+  EXPECT_EQ(capture->snapshot().size(), 3u);
+}

@@ -48,6 +48,7 @@ public:
   {
     size_t motor_index{0};
     Frame frame{};
+    std::optional<Frame> following_frame{};
   };
 
   struct RecoveryUpdate
@@ -89,6 +90,7 @@ private:
     Frame frame;
     size_t motor_index{0};
     uint64_t generation{0};
+    std::optional<Frame> following_frame{};
   };
 
   void publish_transaction(const Frame & frame);

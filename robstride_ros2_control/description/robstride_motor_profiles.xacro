@@ -17,6 +17,18 @@
     <state_interface name="ready"/>
   </xacro:macro>
 
+  <!-- CSP limits are in motor-output coordinates. Gains remain motor parameters. -->
+  <xacro:macro name="robstride_csp_params" params="position_min position_max speed_limit current_limit torque_limit">
+    <param name="control_mode">csp</param>
+    <param name="csp_position_min">${position_min}</param>
+    <param name="csp_position_max">${position_max}</param>
+    <param name="csp_speed_limit">${speed_limit}</param>
+    <param name="csp_current_limit">${current_limit}</param>
+    <param name="csp_torque_limit">${torque_limit}</param>
+    <state_interface name="motor_position"/>
+    <state_interface name="motor_position_wrapped"/>
+  </xacro:macro>
+
   <xacro:macro name="robstride_resilience_params">
     <param name="feedback_timeout_ms">500</param>
     <param name="fail_on_feedback_timeout">true</param>
